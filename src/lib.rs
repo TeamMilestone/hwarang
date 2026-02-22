@@ -97,4 +97,18 @@ mod tests {
         assert!(text.contains("HWP version: 5."));
         assert!(text.contains("Compressed: false"));
     }
+
+    #[test]
+    fn test_fileheader_compressed_hwp() {
+        // blank.hwp (root) has Scripts etc, check version parsing
+        let path = sample_path("blank.hwp");
+        if !path.exists() {
+            eprintln!("Skipping test: {:?} not found", path);
+            return;
+        }
+        let text = extract_text_from_file(&path).unwrap();
+        assert!(text.contains("HWP version: 5."));
+        // Root blank.hwp also has BodyText/Section0
+        assert!(text.contains("BodyText"));
+    }
 }
