@@ -6,10 +6,10 @@ use std::fs::File;
 use std::path::Path;
 
 use crate::error::{HwpError, Result};
+use crate::extract as text_extract;
 use crate::hwp::docinfo;
 use crate::hwp::header::FileHeader;
-use crate::hwp::para_text;
-use crate::hwp::record::{self, Record};
+use crate::hwp::record;
 use crate::hwp::stream;
 
 /// HWP 파일에서 텍스트를 추출한다.
@@ -45,21 +45,10 @@ pub fn extract_text_from_file(path: &Path) -> Result<String> {
         };
         let data = stream::read_and_decompress(&mut s, header.compressed)?;
         let records = record::read_records(&data)?;
-        extract_section_text(&records, &mut text);
+        text_extract::extract_section_text(&records, &mut text);
     }
 
     Ok(text)
-}
-
-/// 섹션 레코드 시퀀스에서 PARA_TEXT 레코드의 텍스트를 추출한다.
-fn extract_section_text(records: &[Record], text: &mut String) {
-    for rec in records {
-        if rec.header.tag_id == record::HWPTAG_PARA_TEXT {
-            let (para_text, _controls) = para_text::extract_text(&rec.data);
-            text.push_str(&para_text);
-            text.push('\n');
-        }
-    }
 }
 
 /// OLE 컨테이너의 스트림 목록을 반환한다.
@@ -131,10 +120,63 @@ mod tests {
             return;
         }
         let text = extract_text_from_file(&path).unwrap();
-        // 표 안의 텍스트는 Iter hwp06에서 추출되므로, 본문 텍스트만 확인
-        // 표.hwp에는 "표 예제" 등의 본문 텍스트가 있을 수 있음
-        eprintln!("Table text:\n{}", text);
-        // 최소한 에러 없이 추출되어야 함
+        // 표 안의 셀 텍스트도 추출되어야 함
+        assert!(!text.trim().is_empty(), "Table HWP should have text");
+        eprintln!("=== 표.hwp ===\n{}", text);
+    }
+
+    #[test]
+    fn test_extract_text_header_footer_hwp() {
+        let path = sample_path("basic/머리글꼬리글.hwp");
+        if !path.exists() {
+            return;
+        }
+        let text = extract_text_from_file(&path).unwrap();
+        assert!(!text.trim().is_empty());
+        eprintln!("=== 머리글꼬리글.hwp ===\n{}", text);
+    }
+
+    #[test]
+    fn test_extract_text_footnote_hwp() {
+        let path = sample_path("basic/각주미주.hwp");
+        if !path.exists() {
+            return;
+        }
+        let text = extract_text_from_file(&path).unwrap();
+        assert!(!text.trim().is_empty());
+        eprintln!("=== 각주미주.hwp ===\n{}", text);
+    }
+
+    #[test]
+    fn test_extract_text_hidden_comment_hwp() {
+        let path = sample_path("basic/숨은설명.hwp");
+        if !path.exists() {
+            return;
+        }
+        let text = extract_text_from_file(&path).unwrap();
+        assert!(!text.trim().is_empty());
+        eprintln!("=== 숨은설명.hwp ===\n{}", text);
+    }
+
+    #[test]
+    fn test_extract_text_textbox_hwp() {
+        let path = sample_path("basic/글상자.hwp");
+        if !path.exists() {
+            return;
+        }
+        let text = extract_text_from_file(&path).unwrap();
+        assert!(!text.trim().is_empty());
+        eprintln!("=== 글상자.hwp ===\n{}", text);
+    }
+
+    #[test]
+    fn test_extract_text_equation_hwp() {
+        let path = sample_path("basic/수식.hwp");
+        if !path.exists() {
+            return;
+        }
+        let text = extract_text_from_file(&path).unwrap();
+        eprintln!("=== 수식.hwp ===\n{}", text);
     }
 
     #[test]
