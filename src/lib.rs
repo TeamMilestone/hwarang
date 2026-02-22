@@ -6,7 +6,10 @@ use std::fs::File;
 use std::path::Path;
 
 use crate::error::{HwpError, Result};
+use crate::hwp::docinfo;
 use crate::hwp::header::FileHeader;
+use crate::hwp::record;
+use crate::hwp::stream;
 
 /// HWP 파일에서 텍스트를 추출한다.
 pub fn extract_text_from_file(path: &Path) -> Result<String> {
@@ -21,21 +24,28 @@ pub fn extract_text_from_file(path: &Path) -> Result<String> {
         FileHeader::from_reader(&mut stream)?
     };
 
-    // 스트림 목록 출력 (디버그용, 이후 이터레이션에서 실제 추출로 대체)
+    // DocInfo에서 section_count 파싱
+    let doc_info = {
+        let mut s = comp
+            .open_stream("/DocInfo")
+            .map_err(|_| HwpError::StreamNotFound("DocInfo".into()))?;
+        let data = stream::read_and_decompress(&mut s, header.compressed)?;
+        let records = record::read_records(&data)?;
+        docinfo::parse_doc_info(&records)?
+    };
+
+    // 각 섹션에서 텍스트 추출 (Iter hwp05+에서 실제 텍스트 추출 구현)
     let mut text = String::new();
-    text.push_str(&format!("HWP version: {}\n", header.version));
-    text.push_str(&format!("Compressed: {}\n", header.compressed));
-    text.push_str(&format!("Distribution: {}\n", header.distribution));
-
-    // OLE 스트림 목록
-    let entries: Vec<String> = comp
-        .walk()
-        .map(|e| e.path().to_string_lossy().into_owned())
-        .collect();
-
-    text.push_str(&format!("Streams: {}\n", entries.len()));
-    for entry in &entries {
-        text.push_str(&format!("  {}\n", entry));
+    for i in 0..doc_info.section_count {
+        let stream_name = format!("/BodyText/Section{}", i);
+        let mut s = match comp.open_stream(&stream_name) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let _data = stream::read_and_decompress(&mut s, header.compressed)?;
+        let _records = record::read_records(&_data)?;
+        // TODO: 레코드에서 텍스트 추출 (Iter hwp05)
+        text.push_str(&format!("[Section{}: {} records]\n", i, _records.len()));
     }
 
     Ok(text)
@@ -54,8 +64,7 @@ pub fn list_streams(path: &Path) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hwp::record;
-    use crate::hwp::stream;
+    use crate::hwp::{docinfo, record, stream};
 
     fn sample_path(name: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -100,8 +109,19 @@ mod tests {
             return;
         }
         let text = extract_text_from_file(&path).unwrap();
-        assert!(text.contains("HWP version: 5."));
-        assert!(text.contains("Compressed: false"));
+        assert!(text.contains("Section0"));
+    }
+
+    #[test]
+    fn test_docinfo_section_count() {
+        let Some((mut comp, header)) = open_hwp("basic/blank.hwp") else {
+            return;
+        };
+        let mut s = comp.open_stream("/DocInfo").unwrap();
+        let data = stream::read_and_decompress(&mut s, header.compressed).unwrap();
+        let records = record::read_records(&data).unwrap();
+        let info = docinfo::parse_doc_info(&records).unwrap();
+        assert_eq!(info.section_count, 1);
     }
 
     #[test]
