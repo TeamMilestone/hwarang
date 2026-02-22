@@ -8,7 +8,8 @@ use std::path::Path;
 use crate::error::{HwpError, Result};
 use crate::hwp::docinfo;
 use crate::hwp::header::FileHeader;
-use crate::hwp::record;
+use crate::hwp::para_text;
+use crate::hwp::record::{self, Record};
 use crate::hwp::stream;
 
 /// HWP 파일에서 텍스트를 추출한다.
@@ -34,7 +35,7 @@ pub fn extract_text_from_file(path: &Path) -> Result<String> {
         docinfo::parse_doc_info(&records)?
     };
 
-    // 각 섹션에서 텍스트 추출 (Iter hwp05+에서 실제 텍스트 추출 구현)
+    // 각 섹션에서 텍스트 추출
     let mut text = String::new();
     for i in 0..doc_info.section_count {
         let stream_name = format!("/BodyText/Section{}", i);
@@ -42,13 +43,23 @@ pub fn extract_text_from_file(path: &Path) -> Result<String> {
             Ok(s) => s,
             Err(_) => continue,
         };
-        let _data = stream::read_and_decompress(&mut s, header.compressed)?;
-        let _records = record::read_records(&_data)?;
-        // TODO: 레코드에서 텍스트 추출 (Iter hwp05)
-        text.push_str(&format!("[Section{}: {} records]\n", i, _records.len()));
+        let data = stream::read_and_decompress(&mut s, header.compressed)?;
+        let records = record::read_records(&data)?;
+        extract_section_text(&records, &mut text);
     }
 
     Ok(text)
+}
+
+/// 섹션 레코드 시퀀스에서 PARA_TEXT 레코드의 텍스트를 추출한다.
+fn extract_section_text(records: &[Record], text: &mut String) {
+    for rec in records {
+        if rec.header.tag_id == record::HWPTAG_PARA_TEXT {
+            let (para_text, _controls) = para_text::extract_text(&rec.data);
+            text.push_str(&para_text);
+            text.push('\n');
+        }
+    }
 }
 
 /// OLE 컨테이너의 스트림 목록을 반환한다.
@@ -108,8 +119,44 @@ mod tests {
         if !path.exists() {
             return;
         }
+        // blank.hwp는 빈 문서이므로 빈 텍스트 또는 줄바꿈만
         let text = extract_text_from_file(&path).unwrap();
-        assert!(text.contains("Section0"));
+        assert!(text.trim().is_empty() || text.chars().all(|c| c.is_whitespace()));
+    }
+
+    #[test]
+    fn test_extract_text_table_hwp() {
+        let path = sample_path("basic/표.hwp");
+        if !path.exists() {
+            return;
+        }
+        let text = extract_text_from_file(&path).unwrap();
+        // 표 안의 텍스트는 Iter hwp06에서 추출되므로, 본문 텍스트만 확인
+        // 표.hwp에는 "표 예제" 등의 본문 텍스트가 있을 수 있음
+        eprintln!("Table text:\n{}", text);
+        // 최소한 에러 없이 추출되어야 함
+    }
+
+    #[test]
+    fn test_extract_text_compressed() {
+        // superboard 실제 compressed 파일
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("superboard/data/raw/files/20160322124");
+        if !path.exists() {
+            return;
+        }
+        let hwp_path = std::fs::read_dir(&path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().extension().map_or(false, |ext| ext == "hwp"))
+            .map(|e| e.path());
+
+        let Some(hwp_path) = hwp_path else { return };
+        let text = extract_text_from_file(&hwp_path).unwrap();
+        // 실제 문서이므로 텍스트가 있어야 함
+        assert!(!text.trim().is_empty(), "Compressed HWP should have text");
+        eprintln!("Compressed HWP text (first 500 chars):\n{}", &text[..text.len().min(500)]);
     }
 
     #[test]
