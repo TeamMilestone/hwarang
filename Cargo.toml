@@ -1,0 +1,14 @@
+[package]
+name = "hwp-text-extract"
+version = "0.1.0"
+edition = "2021"
+description = "Fast HWP document text extractor"
+
+[dependencies]
+cfb = "0.14"
+flate2 = "1"
+byteorder = "1"
+rayon = "1"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
