@@ -142,12 +142,13 @@ fn process_batch_with_structure(files: &[PathBuf], base_dir: &Path, output_dir: 
 fn main() {
     let args = Args::parse();
 
-    // rayon 스레드풀 설정
-    if let Some(n) = args.threads {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(n)
-            .build_global()
-            .unwrap();
+    // rayon 스레드풀 설정 (4MB 스택 사이즈: 깊은 중첩 문서 대비)
+    {
+        let mut builder = rayon::ThreadPoolBuilder::new().stack_size(4 * 1024 * 1024);
+        if let Some(n) = args.threads {
+            builder = builder.num_threads(n);
+        }
+        builder.build_global().unwrap();
     }
 
     if args.list_streams {

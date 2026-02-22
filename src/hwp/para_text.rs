@@ -1,6 +1,3 @@
-use byteorder::{LittleEndian, ReadBytesExt};
-use std::io::Cursor;
-
 /// 문자 타입
 #[derive(Debug, PartialEq)]
 pub enum CharType {
@@ -11,6 +8,7 @@ pub enum CharType {
 }
 
 /// 코드값으로 문자 타입 판별
+#[inline(always)]
 pub fn char_type(code: u16) -> CharType {
     if code > 31 {
         return CharType::Normal;
@@ -36,21 +34,22 @@ pub fn is_text_control(code: u16) -> bool {
 
 /// PARA_TEXT 레코드 데이터에서 텍스트를 추출한다.
 /// 반환: (추출된 텍스트, ControlExtend 코드 목록)
+///
+/// 직접 바이트 슬라이스 접근으로 Cursor/ReadBytesExt 오버헤드 제거
 pub fn extract_text(data: &[u8]) -> (String, Vec<u16>) {
-    let mut text = String::new();
-    let mut controls = Vec::new();
-    let mut cursor = Cursor::new(data);
     let len = data.len();
+    // 대략적 용량 사전할당: UTF-16 코드유닛 수의 절반 정도
+    let mut text = String::with_capacity(len / 2);
+    let mut controls = Vec::new();
+    let mut pos = 0;
 
-    while (cursor.position() as usize) + 1 < len {
-        let code = match cursor.read_u16::<LittleEndian>() {
-            Ok(c) => c,
-            Err(_) => break,
-        };
+    while pos + 1 < len {
+        let code = u16::from_le_bytes([data[pos], data[pos + 1]]);
+        pos += 2;
 
         match char_type(code) {
             CharType::Normal => {
-                // UTF-16LE 단일 코드 유닛 → char
+                // UTF-16LE 단일 코드 유닛 → char (BMP)
                 if let Some(ch) = char::from_u32(code as u32) {
                     text.push(ch);
                 }
@@ -58,7 +57,7 @@ pub fn extract_text(data: &[u8]) -> (String, Vec<u16>) {
             CharType::ControlChar => {
                 match code {
                     10 => text.push('\n'), // 줄바꿈
-                    13 => {}              // 문단 끝 (무시, 문단 간 줄바꿈은 상위에서 처리)
+                    13 => {}              // 문단 끝 (무시)
                     24 => text.push('-'), // 하이픈
                     30 => text.push(' '), // 묶음 빈칸
                     31 => text.push(' '), // 고정폭 빈칸
@@ -66,23 +65,19 @@ pub fn extract_text(data: &[u8]) -> (String, Vec<u16>) {
                 }
             }
             CharType::ControlInline => {
-                // 14바이트 스킵 (12 addition + 2 code)
-                let remaining = len - cursor.position() as usize;
-                let skip = 14.min(remaining);
-                cursor.set_position(cursor.position() + skip as u64);
+                // 14바이트 스킵
+                let skip = 14.min(len - pos);
+                pos += skip;
 
                 if code == 9 {
                     text.push('\t'); // 탭
                 }
             }
             CharType::ControlExtend => {
-                // 컨트롤 코드 기록 (이후 CTRL_HEADER와 매칭)
                 controls.push(code);
-
-                // 14바이트 스킵 (12 addition + 2 code)
-                let remaining = len - cursor.position() as usize;
-                let skip = 14.min(remaining);
-                cursor.set_position(cursor.position() + skip as u64);
+                // 14바이트 스킵
+                let skip = 14.min(len - pos);
+                pos += skip;
             }
         }
     }

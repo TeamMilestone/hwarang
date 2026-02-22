@@ -1,6 +1,3 @@
-use byteorder::{LittleEndian, ReadBytesExt};
-use std::io::Read;
-
 use crate::error::{HwpError, Result};
 
 /// HWP 태그 상수 (BEGIN = 0x10)
@@ -82,51 +79,50 @@ pub struct Record {
 }
 
 /// 바이트 슬라이스에서 레코드 시퀀스를 파싱한다.
+/// 직접 인덱싱으로 Cursor 오버헤드 제거
 pub fn read_records(data: &[u8]) -> Result<Vec<Record>> {
+    let len = data.len();
     let mut records = Vec::new();
-    let mut cursor = std::io::Cursor::new(data);
+    let mut pos = 0;
 
-    while (cursor.position() as usize) < data.len() {
-        // 최소 4바이트 필요
-        if data.len() - (cursor.position() as usize) < 4 {
-            break;
-        }
+    while pos + 4 <= len {
+        let value = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        pos += 4;
 
-        let value = cursor.read_u32::<LittleEndian>()?;
-        let tag_id = (value & 0x3FF) as u16; // bits 0-9
-        let level = ((value >> 10) & 0x3FF) as u16; // bits 10-19
-        let mut size = (value >> 20) & 0xFFF; // bits 20-31
+        let tag_id = (value & 0x3FF) as u16;
+        let level = ((value >> 10) & 0x3FF) as u16;
+        let mut size = ((value >> 20) & 0xFFF) as u32;
 
         // 확장 크기: size == 4095이면 추가 4바이트
         if size == 4095 {
-            if data.len() - (cursor.position() as usize) < 4 {
+            if pos + 4 > len {
                 return Err(HwpError::InvalidRecordHeader);
             }
-            size = cursor.read_u32::<LittleEndian>()?;
+            size = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            pos += 4;
         }
 
-        let header = RecordHeader {
-            tag_id,
-            level,
-            size,
-        };
-
-        // 레코드 바디 읽기
-        let pos = cursor.position() as usize;
-        let end = pos + size as usize;
-        if end > data.len() {
+        let body_end = pos + size as usize;
+        if body_end > len {
             return Err(HwpError::Parse(format!(
                 "Record body overflow: need {} bytes at pos {}, but only {} available",
                 size,
                 pos,
-                data.len() - pos
+                len - pos
             )));
         }
 
-        let mut body = vec![0u8; size as usize];
-        cursor.read_exact(&mut body)?;
+        let body = data[pos..body_end].to_vec();
+        pos = body_end;
 
-        records.push(Record { header, data: body });
+        records.push(Record {
+            header: RecordHeader {
+                tag_id,
+                level,
+                size,
+            },
+            data: body,
+        });
     }
 
     Ok(records)
