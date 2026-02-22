@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::error::{HwpError, Result};
 use crate::extract as text_extract;
+use crate::hwp::crypto;
 use crate::hwp::docinfo;
 use crate::hwp::header::FileHeader;
 use crate::hwp::record;
@@ -26,6 +27,7 @@ pub fn extract_text_from_file(path: &Path) -> Result<String> {
     };
 
     // DocInfo에서 section_count 파싱
+    // 배포문서도 DocInfo는 일반 방식으로 읽음
     let doc_info = {
         let mut s = comp
             .open_stream("/DocInfo")
@@ -35,15 +37,36 @@ pub fn extract_text_from_file(path: &Path) -> Result<String> {
         docinfo::parse_doc_info(&records)?
     };
 
+    // 배포문서: ViewText 사용, 일반문서: BodyText 사용
+    let storage = if header.distribution {
+        "ViewText"
+    } else {
+        "BodyText"
+    };
+
     // 각 섹션에서 텍스트 추출
     let mut text = String::new();
     for i in 0..doc_info.section_count {
-        let stream_name = format!("/BodyText/Section{}", i);
+        let stream_name = format!("/{}/Section{}", storage, i);
         let mut s = match comp.open_stream(&stream_name) {
             Ok(s) => s,
             Err(_) => continue,
         };
-        let data = stream::read_and_decompress(&mut s, header.compressed)?;
+
+        let data = if header.distribution {
+            // 배포문서: 스트림 데이터를 읽고 → 복호화 → 압축해제
+            let raw = stream::read_stream_data(&mut s)?;
+            let decrypted = crypto::decrypt_distribution_stream(&raw)?;
+            if header.compressed {
+                stream::decompress(&decrypted)?
+            } else {
+                decrypted
+            }
+        } else {
+            // 일반문서: 압축해제만
+            stream::read_and_decompress(&mut s, header.compressed)?
+        };
+
         let records = record::read_records(&data)?;
         text_extract::extract_section_text(&records, &mut text);
     }
@@ -177,6 +200,17 @@ mod tests {
         }
         let text = extract_text_from_file(&path).unwrap();
         eprintln!("=== 수식.hwp ===\n{}", text);
+    }
+
+    #[test]
+    fn test_extract_text_distribution_hwp() {
+        let path = sample_path("distribution.hwp");
+        if !path.exists() {
+            return;
+        }
+        let text = extract_text_from_file(&path).unwrap();
+        eprintln!("=== distribution.hwp ===\n{}", text);
+        // 배포문서도 텍스트 추출이 가능해야 함
     }
 
     #[test]

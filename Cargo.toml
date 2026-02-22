@@ -12,3 +12,5 @@ rayon = "1"
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 anyhow = "1"
+aes = "0.8"
+ecb = { version = "0.1", features = ["alloc"] }
