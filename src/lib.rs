@@ -54,6 +54,8 @@ pub fn list_streams(path: &Path) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hwp::record;
+    use crate::hwp::stream;
 
     fn sample_path(name: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -63,34 +65,38 @@ mod tests {
             .join(name)
     }
 
+    fn open_hwp(name: &str) -> Option<(cfb::CompoundFile<File>, FileHeader)> {
+        let path = sample_path(name);
+        if !path.exists() {
+            eprintln!("Skipping: {:?} not found", path);
+            return None;
+        }
+        let file = File::open(&path).unwrap();
+        let mut comp = cfb::CompoundFile::open(file).unwrap();
+        let header = {
+            let mut s = comp.open_stream("/FileHeader").unwrap();
+            FileHeader::from_reader(&mut s).unwrap()
+        };
+        Some((comp, header))
+    }
+
     #[test]
     fn test_list_streams_blank_hwp() {
         let path = sample_path("basic/blank.hwp");
         if !path.exists() {
-            eprintln!("Skipping test: {:?} not found", path);
             return;
         }
         let streams = list_streams(&path).unwrap();
         assert!(!streams.is_empty());
-
         let names: Vec<&str> = streams.iter().map(|s| s.as_str()).collect();
-        assert!(
-            names.iter().any(|n| n.contains("FileHeader")),
-            "FileHeader not found in: {:?}",
-            names
-        );
-        assert!(
-            names.iter().any(|n| n.contains("DocInfo")),
-            "DocInfo not found in: {:?}",
-            names
-        );
+        assert!(names.iter().any(|n| n.contains("FileHeader")));
+        assert!(names.iter().any(|n| n.contains("DocInfo")));
     }
 
     #[test]
     fn test_extract_text_blank_hwp() {
         let path = sample_path("basic/blank.hwp");
         if !path.exists() {
-            eprintln!("Skipping test: {:?} not found", path);
             return;
         }
         let text = extract_text_from_file(&path).unwrap();
@@ -99,16 +105,82 @@ mod tests {
     }
 
     #[test]
-    fn test_fileheader_compressed_hwp() {
-        // blank.hwp (root) has Scripts etc, check version parsing
-        let path = sample_path("blank.hwp");
+    fn test_docinfo_records() {
+        let Some((mut comp, header)) = open_hwp("basic/blank.hwp") else {
+            return;
+        };
+        let mut s = comp.open_stream("/DocInfo").unwrap();
+        let data = stream::read_and_decompress(&mut s, header.compressed).unwrap();
+        let records = record::read_records(&data).unwrap();
+
+        assert!(!records.is_empty());
+        // 첫 번째 레코드는 DOCUMENT_PROPERTIES
+        assert_eq!(
+            records[0].header.tag_id,
+            record::HWPTAG_DOCUMENT_PROPERTIES
+        );
+        assert_eq!(records[0].header.level, 0);
+    }
+
+    #[test]
+    fn test_section0_records() {
+        let Some((mut comp, header)) = open_hwp("basic/blank.hwp") else {
+            return;
+        };
+        let mut s = comp.open_stream("/BodyText/Section0").unwrap();
+        let data = stream::read_and_decompress(&mut s, header.compressed).unwrap();
+        let records = record::read_records(&data).unwrap();
+
+        assert!(!records.is_empty());
+        // Section은 PARA_HEADER로 시작
+        assert_eq!(records[0].header.tag_id, record::HWPTAG_PARA_HEADER);
+    }
+
+    #[test]
+    fn test_compressed_file_records() {
+        // superboard의 실제 compressed 파일 테스트
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("superboard/data/raw/files/20160322124");
         if !path.exists() {
-            eprintln!("Skipping test: {:?} not found", path);
             return;
         }
-        let text = extract_text_from_file(&path).unwrap();
-        assert!(text.contains("HWP version: 5."));
-        // Root blank.hwp also has BodyText/Section0
-        assert!(text.contains("BodyText"));
+        // 디렉토리 안의 첫 번째 .hwp 파일 찾기
+        let hwp_path = std::fs::read_dir(&path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                e.path()
+                    .extension()
+                    .map_or(false, |ext| ext == "hwp")
+            })
+            .map(|e| e.path());
+
+        let Some(hwp_path) = hwp_path else { return };
+
+        let file = File::open(&hwp_path).unwrap();
+        let mut comp = cfb::CompoundFile::open(file).unwrap();
+        let header = {
+            let mut s = comp.open_stream("/FileHeader").unwrap();
+            FileHeader::from_reader(&mut s).unwrap()
+        };
+        assert!(header.compressed);
+
+        // DocInfo 레코드 파싱
+        let mut s = comp.open_stream("/DocInfo").unwrap();
+        let data = stream::read_and_decompress(&mut s, header.compressed).unwrap();
+        let records = record::read_records(&data).unwrap();
+        assert!(!records.is_empty());
+        assert_eq!(
+            records[0].header.tag_id,
+            record::HWPTAG_DOCUMENT_PROPERTIES
+        );
+
+        // Section0 레코드 파싱
+        let mut s = comp.open_stream("/BodyText/Section0").unwrap();
+        let data = stream::read_and_decompress(&mut s, header.compressed).unwrap();
+        let records = record::read_records(&data).unwrap();
+        assert!(!records.is_empty());
+        assert_eq!(records[0].header.tag_id, record::HWPTAG_PARA_HEADER);
     }
 }
