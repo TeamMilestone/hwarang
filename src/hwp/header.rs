@@ -103,4 +103,59 @@ mod tests {
         let result = FileHeader::from_reader(&mut &data[..]);
         assert!(matches!(result, Err(HwpError::InvalidSignature)));
     }
+
+    /// 유효한 FileHeader 바이트열을 생성하는 헬퍼
+    fn make_header_bytes(version: u32, flags: u32) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(HWP_SIGNATURE);
+        data.extend_from_slice(&version.to_le_bytes());
+        data.extend_from_slice(&flags.to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn test_password_protected() {
+        let data = make_header_bytes(0x05010207, FLAG_PASSWORD);
+        let result = FileHeader::from_reader(&mut &data[..]);
+        assert!(matches!(result, Err(HwpError::PasswordProtected)));
+    }
+
+    #[test]
+    fn test_distribution_flag() {
+        let data = make_header_bytes(0x05010207, FLAG_DISTRIBUTION);
+        let header = FileHeader::from_reader(&mut &data[..]).unwrap();
+        assert!(header.distribution);
+        assert!(!header.compressed);
+        assert!(!header.password);
+    }
+
+    #[test]
+    fn test_compressed_flag() {
+        let data = make_header_bytes(0x05010207, FLAG_COMPRESSED);
+        let header = FileHeader::from_reader(&mut &data[..]).unwrap();
+        assert!(header.compressed);
+        assert!(!header.distribution);
+    }
+
+    #[test]
+    fn test_combined_flags() {
+        let data = make_header_bytes(0x05010207, FLAG_COMPRESSED | FLAG_DISTRIBUTION);
+        let header = FileHeader::from_reader(&mut &data[..]).unwrap();
+        assert!(header.compressed);
+        assert!(header.distribution);
+    }
+
+    #[test]
+    fn test_truncated_data() {
+        // 시그니처만 있고 버전/플래그가 없는 경우
+        let data = HWP_SIGNATURE.to_vec();
+        let result = FileHeader::from_reader(&mut &data[..]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_file_version_display() {
+        let v = FileVersion::from_u32(0x05010207);
+        assert_eq!(v.to_string(), "5.1.2.7");
+    }
 }

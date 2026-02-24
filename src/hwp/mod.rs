@@ -1,9 +1,7 @@
-pub mod header;
-pub mod record;
-pub mod stream;
+pub mod control;
 pub mod crypto;
 pub mod docinfo;
+pub mod header;
 pub mod para_text;
-pub mod control;
-pub mod paragraph;
-pub mod section;
+pub mod record;
+pub mod stream;

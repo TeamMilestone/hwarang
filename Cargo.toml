@@ -1,16 +1,39 @@
 [package]
-name = "hwp-text-extract"
+name = "hwarang"
 version = "0.1.0"
 edition = "2021"
 description = "Fast HWP document text extractor"
+license = "MIT"
+authors = ["Lee Wonsup <onesup.lee@gmail.com>"]
+repository = "https://github.com/teammilestone/hwarang"
+readme = "README.md"
+keywords = ["hwp", "hwpx", "hancom", "text-extraction", "korean"]
+categories = ["parser-implementations", "text-processing"]
 
 [dependencies]
 cfb = "0.14"
 flate2 = "1"
 byteorder = "1"
-rayon = "1"
-clap = { version = "4", features = ["derive"] }
 thiserror = "2"
-anyhow = "1"
 aes = "0.8"
 ecb = { version = "0.1", features = ["alloc"] }
+zip = "2"
+quick-xml = "0.37"
+
+# CLI-only dependencies
+rayon = { version = "1", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+anyhow = { version = "1", optional = true }
+
+[features]
+default = ["cli"]
+cli = ["dep:rayon", "dep:clap", "dep:anyhow"]
+
+[[bin]]
+name = "hwarang"
+required-features = ["cli"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

@@ -1,8 +1,10 @@
 pub mod error;
 pub mod extract;
 pub mod hwp;
+pub mod hwpx;
 
 use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use crate::error::{HwpError, Result};
@@ -13,8 +15,48 @@ use crate::hwp::header::FileHeader;
 use crate::hwp::record;
 use crate::hwp::stream;
 
-/// HWP 파일에서 텍스트를 추출한다.
+/// Extracts text content from an HWP or HWPX document file.
+///
+/// Automatically detects the file format by reading the magic bytes:
+/// - `D0 CF 11 E0` — HWP (OLE compound document)
+/// - `50 4B 03 04` — HWPX (ZIP-based OWPML)
+/// - `3C 3F 78 6D` — HWPML (plain XML)
+///
+/// # Errors
+///
+/// Returns [`HwpError::UnsupportedFormat`] if the file is too short or has
+/// unrecognised magic bytes. Other variants may be returned for I/O failures,
+/// invalid structures, or password-protected documents.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::path::Path;
+///
+/// let text = hwarang::extract_text_from_file(Path::new("document.hwp"))?;
+/// println!("{text}");
+/// # Ok::<(), hwarang::error::HwpError>(())
+/// ```
 pub fn extract_text_from_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path)?;
+    let mut magic = [0u8; 4];
+    let n = file.read(&mut magic)?;
+    drop(file);
+
+    if n < 4 {
+        return Err(HwpError::UnsupportedFormat);
+    }
+
+    match magic {
+        [0x50, 0x4B, 0x03, 0x04] => hwpx::extract_text_from_hwpx(path), // ZIP (HWPX)
+        [0xD0, 0xCF, 0x11, 0xE0] => extract_text_from_hwp(path),        // OLE (HWP)
+        [0x3C, 0x3F, 0x78, 0x6D] => hwpx::extract_text_from_hwpml(path), // <?xml (HWPML)
+        _ => Err(HwpError::UnsupportedFormat),
+    }
+}
+
+/// HWP(OLE 컨테이너) 파일에서 텍스트를 추출한다.
+fn extract_text_from_hwp(path: &Path) -> Result<String> {
     let file = File::open(path)?;
     let mut comp = cfb::CompoundFile::open(file)?;
 
@@ -74,7 +116,26 @@ pub fn extract_text_from_file(path: &Path) -> Result<String> {
     Ok(text)
 }
 
-/// OLE 컨테이너의 스트림 목록을 반환한다.
+/// Lists all streams inside an OLE compound file.
+///
+/// Useful for inspecting the internal structure of an HWP file.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened or is not a valid OLE
+/// compound document.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::path::Path;
+///
+/// let streams = hwarang::list_streams(Path::new("document.hwp"))?;
+/// for s in &streams {
+///     println!("{s}");
+/// }
+/// # Ok::<(), hwarang::error::HwpError>(())
+/// ```
 pub fn list_streams(path: &Path) -> Result<Vec<String>> {
     let file = File::open(path)?;
     let comp = cfb::CompoundFile::open(file)?;
@@ -232,7 +293,8 @@ mod tests {
         let text = extract_text_from_file(&hwp_path).unwrap();
         // 실제 문서이므로 텍스트가 있어야 함
         assert!(!text.trim().is_empty(), "Compressed HWP should have text");
-        eprintln!("Compressed HWP text (first 500 chars):\n{}", &text[..text.len().min(500)]);
+        let preview: String = text.chars().take(500).collect();
+        eprintln!("Compressed HWP text (first 500 chars):\n{}", preview);
     }
 
     #[test]
@@ -258,10 +320,7 @@ mod tests {
 
         assert!(!records.is_empty());
         // 첫 번째 레코드는 DOCUMENT_PROPERTIES
-        assert_eq!(
-            records[0].header.tag_id,
-            record::HWPTAG_DOCUMENT_PROPERTIES
-        );
+        assert_eq!(records[0].header.tag_id, record::HWPTAG_DOCUMENT_PROPERTIES);
         assert_eq!(records[0].header.level, 0);
     }
 
@@ -292,11 +351,7 @@ mod tests {
         let hwp_path = std::fs::read_dir(&path)
             .unwrap()
             .filter_map(|e| e.ok())
-            .find(|e| {
-                e.path()
-                    .extension()
-                    .map_or(false, |ext| ext == "hwp")
-            })
+            .find(|e| e.path().extension().map_or(false, |ext| ext == "hwp"))
             .map(|e| e.path());
 
         let Some(hwp_path) = hwp_path else { return };
@@ -314,10 +369,7 @@ mod tests {
         let data = stream::read_and_decompress(&mut s, header.compressed).unwrap();
         let records = record::read_records(&data).unwrap();
         assert!(!records.is_empty());
-        assert_eq!(
-            records[0].header.tag_id,
-            record::HWPTAG_DOCUMENT_PROPERTIES
-        );
+        assert_eq!(records[0].header.tag_id, record::HWPTAG_DOCUMENT_PROPERTIES);
 
         // Section0 레코드 파싱
         let mut s = comp.open_stream("/BodyText/Section0").unwrap();
@@ -325,5 +377,50 @@ mod tests {
         let records = record::read_records(&data).unwrap();
         assert!(!records.is_empty());
         assert_eq!(records[0].header.tag_id, record::HWPTAG_PARA_HEADER);
+    }
+
+    #[test]
+    fn test_unsupported_format() {
+        // 임시 파일에 잘못된 매직 바이트 기록
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_unsupported.bin");
+        std::fs::write(&path, b"NOT_A_VALID_FORMAT").unwrap();
+        let result = extract_text_from_file(&path);
+        assert!(result.is_err());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_nonexistent_file() {
+        let path = Path::new("/tmp/does_not_exist_hwp_test_12345.hwp");
+        let result = extract_text_from_file(path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_file_too_short() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_too_short.hwp");
+        std::fs::write(&path, b"AB").unwrap(); // 4바이트 미만
+        let result = extract_text_from_file(&path);
+        assert!(matches!(result, Err(HwpError::UnsupportedFormat)));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_empty_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_empty.hwp");
+        std::fs::write(&path, b"").unwrap();
+        let result = extract_text_from_file(&path);
+        assert!(matches!(result, Err(HwpError::UnsupportedFormat)));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_list_streams_nonexistent() {
+        let path = Path::new("/tmp/does_not_exist_hwp_test_12345.hwp");
+        let result = list_streams(path);
+        assert!(result.is_err());
     }
 }

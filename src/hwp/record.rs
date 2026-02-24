@@ -72,7 +72,7 @@ impl RecordHeader {
 }
 
 /// 레코드 = 헤더 + 바디
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Record {
     pub header: RecordHeader,
     pub data: Vec<u8>,
@@ -91,7 +91,7 @@ pub fn read_records(data: &[u8]) -> Result<Vec<Record>> {
 
         let tag_id = (value & 0x3FF) as u16;
         let level = ((value >> 10) & 0x3FF) as u16;
-        let mut size = ((value >> 20) & 0xFFF) as u32;
+        let mut size = (value >> 20) & 0xFFF;
 
         // 확장 크기: size == 4095이면 추가 4바이트
         if size == 4095 {
@@ -165,5 +165,89 @@ mod tests {
         assert_eq!(records[0].header.tag_id, HWPTAG_PARA_TEXT);
         assert_eq!(records[0].header.level, 1);
         assert_eq!(records[0].header.size, 5000);
+    }
+
+    #[test]
+    fn test_empty_data() {
+        let records = read_records(&[]).unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn test_truncated_header() {
+        // 4바이트 미만 → 레코드 없음 (에러가 아님)
+        let records = read_records(&[0x10, 0x00]).unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn test_body_overflow() {
+        // 헤더에 size=100을 넣지만 바디 데이터가 부족
+        let value: u32 = (100 << 20) | (0 << 10) | 16;
+        let data = value.to_le_bytes().to_vec();
+        let result = read_records(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_multiple_records() {
+        let mut data = Vec::new();
+        // 첫 번째 레코드: tag=0x10, level=0, size=4
+        let v1: u32 = (4 << 20) | (0 << 10) | 16;
+        data.extend_from_slice(&v1.to_le_bytes());
+        data.extend_from_slice(&[1, 2, 3, 4]);
+        // 두 번째 레코드: tag=PARA_HEADER, level=1, size=2
+        let v2: u32 = (2 << 20) | (1 << 10) | (HWPTAG_PARA_HEADER as u32);
+        data.extend_from_slice(&v2.to_le_bytes());
+        data.extend_from_slice(&[5, 6]);
+
+        let records = read_records(&data).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].data, vec![1, 2, 3, 4]);
+        assert_eq!(records[1].header.tag_id, HWPTAG_PARA_HEADER);
+        assert_eq!(records[1].header.level, 1);
+        assert_eq!(records[1].data, vec![5, 6]);
+    }
+
+    #[test]
+    fn test_zero_size_record() {
+        // tag=0x10, level=0, size=0
+        let value: u32 = (0 << 20) | (0 << 10) | 16;
+        let data = value.to_le_bytes().to_vec();
+        let records = read_records(&data).unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].data.is_empty());
+    }
+
+    #[test]
+    fn test_tag_name() {
+        let header = RecordHeader {
+            tag_id: HWPTAG_PARA_TEXT,
+            level: 0,
+            size: 0,
+        };
+        assert_eq!(header.tag_name(), "PARA_TEXT");
+
+        let unknown = RecordHeader {
+            tag_id: 0xFF,
+            level: 0,
+            size: 0,
+        };
+        assert_eq!(unknown.tag_name(), "UNKNOWN");
+    }
+
+    #[test]
+    fn test_record_clone() {
+        let record = Record {
+            header: RecordHeader {
+                tag_id: HWPTAG_PARA_HEADER,
+                level: 0,
+                size: 4,
+            },
+            data: vec![1, 2, 3, 4],
+        };
+        let cloned = record.clone();
+        assert_eq!(cloned.header.tag_id, record.header.tag_id);
+        assert_eq!(cloned.data, record.data);
     }
 }

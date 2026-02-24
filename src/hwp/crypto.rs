@@ -14,13 +14,12 @@ type Aes128EcbDec = ecb::Decryptor<Aes128>;
 /// 0~3번 바이트는 seed로 사용되지만 number 카운터도 소비한다.
 fn deobfuscate(data: &mut [u8; 256]) {
     // Java의 LittleEndian.getInt() → signed int32
-    let mut random_seed: i32 =
-        i32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    let mut random_seed: i32 = i32::from_le_bytes([data[0], data[1], data[2], data[3]]);
 
     let mut value: u8 = 0;
     let mut number: i32 = 0;
 
-    for i in 0..256 {
+    for (i, byte) in data.iter_mut().enumerate() {
         if number == 0 {
             // value() = (byte)(rand() & 0xFF)
             random_seed = random_seed.wrapping_mul(214013).wrapping_add(2531011);
@@ -31,7 +30,7 @@ fn deobfuscate(data: &mut [u8; 256]) {
         }
 
         if i >= 4 {
-            data[i] ^= value;
+            *byte ^= value;
         }
 
         number -= 1;
@@ -103,4 +102,46 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_decrypt_exact_minimum_length() {
+        // 정확히 260바이트 → 암호화된 데이터 0바이트 → 빈 결과
+        let data = vec![0u8; 260];
+        let result = decrypt_distribution_stream(&data).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_decrypt_not_block_aligned() {
+        // 260 + 15바이트 (16의 배수가 아님) → AES 복호화 실패
+        let data = vec![0u8; 275];
+        let result = decrypt_distribution_stream(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decrypt_one_block() {
+        // 260 + 16바이트 → AES ECB 1블록 복호화 (키가 유효하므로 성공)
+        let data = vec![0u8; 276];
+        let result = decrypt_distribution_stream(&data);
+        // deobfuscate가 키를 결정하므로 결과는 성공
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_deobfuscate_deterministic() {
+        let mut data1 = [42u8; 256];
+        let mut data2 = [42u8; 256];
+        deobfuscate(&mut data1);
+        deobfuscate(&mut data2);
+        assert_eq!(data1, data2, "deobfuscate should be deterministic");
+    }
+
+    #[test]
+    fn test_deobfuscate_modifies_data() {
+        let original = [1u8; 256];
+        let mut data = original;
+        deobfuscate(&mut data);
+        // i >= 4 위치의 데이터가 변경되어야 함
+        assert_ne!(&data[4..], &original[4..]);
+    }
 }

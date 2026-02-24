@@ -32,6 +32,71 @@ pub fn is_text_control(code: u16) -> bool {
     matches!(code, 11 | 15 | 16 | 17)
 }
 
+/// 텍스트 세그먼트: ControlExtend 위치에서 분할된 텍스트 조각
+#[derive(Debug, Clone)]
+pub struct TextSegment {
+    pub text: String,
+    /// 이 세그먼트 뒤에 ControlExtend가 있는지
+    pub has_control_after: bool,
+}
+
+/// PARA_TEXT 레코드 데이터를 모든 ControlExtend 위치에서 분할하여 세그먼트 목록을 반환한다.
+///
+/// 모든 ControlExtend에서 분할하여, 대응하는 CTRL_HEADER 서브트리와 1:1 매칭할 수 있게 한다.
+/// 텍스트가 없는 컨트롤(구역정의 등)의 서브트리는 재귀 시 자연스럽게 빈 출력을 생성한다.
+pub fn extract_text_segments(data: &[u8]) -> Vec<TextSegment> {
+    let len = data.len();
+    let mut segments = Vec::new();
+    let mut current = String::with_capacity(len / 2);
+    let mut pos = 0;
+
+    while pos + 1 < len {
+        let code = u16::from_le_bytes([data[pos], data[pos + 1]]);
+        pos += 2;
+
+        match char_type(code) {
+            CharType::Normal => {
+                if let Some(ch) = char::from_u32(code as u32) {
+                    current.push(ch);
+                }
+            }
+            CharType::ControlChar => match code {
+                10 => current.push('\n'),
+                13 => {}
+                24 => current.push('-'),
+                30 => current.push(' '),
+                31 => current.push(' '),
+                _ => {}
+            },
+            CharType::ControlInline => {
+                let skip = 14.min(len - pos);
+                pos += skip;
+                if code == 9 {
+                    current.push('\t');
+                }
+            }
+            CharType::ControlExtend => {
+                let skip = 14.min(len - pos);
+                pos += skip;
+
+                // 모든 ControlExtend에서 분할
+                segments.push(TextSegment {
+                    text: std::mem::take(&mut current),
+                    has_control_after: true,
+                });
+            }
+        }
+    }
+
+    // 마지막 세그먼트
+    segments.push(TextSegment {
+        text: current,
+        has_control_after: false,
+    });
+
+    segments
+}
+
 /// PARA_TEXT 레코드 데이터에서 텍스트를 추출한다.
 /// 반환: (추출된 텍스트, ControlExtend 코드 목록)
 ///
@@ -57,10 +122,10 @@ pub fn extract_text(data: &[u8]) -> (String, Vec<u16>) {
             CharType::ControlChar => {
                 match code {
                     10 => text.push('\n'), // 줄바꿈
-                    13 => {}              // 문단 끝 (무시)
-                    24 => text.push('-'), // 하이픈
-                    30 => text.push(' '), // 묶음 빈칸
-                    31 => text.push(' '), // 고정폭 빈칸
+                    13 => {}               // 문단 끝 (무시)
+                    24 => text.push('-'),  // 하이픈
+                    30 => text.push(' '),  // 묶음 빈칸
+                    31 => text.push(' '),  // 고정폭 빈칸
                     _ => {}
                 }
             }
@@ -153,5 +218,66 @@ mod tests {
         let (text, controls) = extract_text(&data);
         assert_eq!(text, "AB");
         assert_eq!(controls, vec![11]);
+    }
+
+    #[test]
+    fn test_extract_segments_no_control() {
+        // "AB" - 컨트롤 없음
+        let data = vec![0x41, 0x00, 0x42, 0x00];
+        let segments = extract_text_segments(&data);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, "AB");
+        assert!(!segments[0].has_control_after);
+    }
+
+    #[test]
+    fn test_extract_segments_with_table() {
+        // "A" + control_extend(11=table) + "B"
+        let mut data = vec![0x41, 0x00]; // A
+        data.extend_from_slice(&[0x0B, 0x00]); // code 11 (table/drawing)
+        data.extend_from_slice(&[0u8; 14]); // addition
+        data.extend_from_slice(&[0x42, 0x00]); // B
+        let segments = extract_text_segments(&data);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].text, "A");
+        assert!(segments[0].has_control_after);
+        assert_eq!(segments[1].text, "B");
+        assert!(!segments[1].has_control_after);
+    }
+
+    #[test]
+    fn test_extract_segments_multiple_controls() {
+        // "A" + table(11) + "B" + footnote(17) + "C"
+        let mut data = vec![0x41, 0x00]; // A
+        data.extend_from_slice(&[0x0B, 0x00]); // table
+        data.extend_from_slice(&[0u8; 14]);
+        data.extend_from_slice(&[0x42, 0x00]); // B
+        data.extend_from_slice(&[0x11, 0x00]); // footnote (17)
+        data.extend_from_slice(&[0u8; 14]);
+        data.extend_from_slice(&[0x43, 0x00]); // C
+        let segments = extract_text_segments(&data);
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].text, "A");
+        assert!(segments[0].has_control_after);
+        assert_eq!(segments[1].text, "B");
+        assert!(segments[1].has_control_after);
+        assert_eq!(segments[2].text, "C");
+        assert!(!segments[2].has_control_after);
+    }
+
+    #[test]
+    fn test_extract_segments_all_control_extend_splits() {
+        // "A" + control_extend(1) + "B"
+        // 모든 ControlExtend에서 분할
+        let mut data = vec![0x41, 0x00]; // A
+        data.extend_from_slice(&[0x01, 0x00]); // code 1
+        data.extend_from_slice(&[0u8; 14]);
+        data.extend_from_slice(&[0x42, 0x00]); // B
+        let segments = extract_text_segments(&data);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].text, "A");
+        assert!(segments[0].has_control_after);
+        assert_eq!(segments[1].text, "B");
+        assert!(!segments[1].has_control_after);
     }
 }

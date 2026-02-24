@@ -8,9 +8,9 @@ use clap::Parser;
 use rayon::prelude::*;
 
 #[derive(Parser, Debug)]
-#[command(name = "hwp-text-extract", about = "HWP 문서 텍스트 추출기")]
+#[command(name = "hwarang", about = "HWP/HWPX 문서 텍스트 추출기")]
 struct Args {
-    /// 입력 HWP 파일 또는 디렉토리
+    /// 입력 HWP/HWPX 파일 또는 디렉토리
     input: PathBuf,
 
     /// 출력 디렉토리 (지정 시 파일별 .txt 생성)
@@ -48,7 +48,7 @@ fn collect_hwp_files(dir: &Path, recursive: bool) -> Vec<PathBuf> {
             }
         } else if path
             .extension()
-            .map_or(false, |ext| ext.eq_ignore_ascii_case("hwp"))
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("hwp") || ext.eq_ignore_ascii_case("hwpx"))
         {
             files.push(path);
         }
@@ -62,8 +62,9 @@ fn process_batch(files: &[PathBuf], output_dir: &Path) {
     let success = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
 
-    files.par_iter().for_each(|path| {
-        match hwp_text_extract::extract_text_from_file(path) {
+    files
+        .par_iter()
+        .for_each(|path| match hwarang::extract_text_from_file(path) {
             Ok(text) => {
                 let stem = path.file_stem().unwrap_or_default().to_string_lossy();
                 let out_path = output_dir.join(format!("{}.txt", stem));
@@ -78,8 +79,7 @@ fn process_batch(files: &[PathBuf], output_dir: &Path) {
                 eprintln!("EXTRACT_ERR\t{}\t{}", path.display(), e);
                 failed.fetch_add(1, Ordering::Relaxed);
             }
-        }
-    });
+        });
 
     let elapsed = start.elapsed();
     let ok = success.load(Ordering::Relaxed);
@@ -101,7 +101,7 @@ fn process_batch_with_structure(files: &[PathBuf], base_dir: &Path, output_dir: 
     let failed = AtomicUsize::new(0);
 
     files.par_iter().for_each(|path| {
-        match hwp_text_extract::extract_text_from_file(path) {
+        match hwarang::extract_text_from_file(path) {
             Ok(text) => {
                 // 입력 디렉토리 기준 상대 경로 유지
                 let rel = path.strip_prefix(base_dir).unwrap_or(path);
@@ -152,7 +152,7 @@ fn main() {
     }
 
     if args.list_streams {
-        match hwp_text_extract::list_streams(&args.input) {
+        match hwarang::list_streams(&args.input) {
             Ok(streams) => {
                 for s in &streams {
                     println!("{}", s);
@@ -173,9 +173,9 @@ fn main() {
                 eprintln!("Error creating output directory: {}", e);
                 process::exit(1);
             });
-            process_batch(&[args.input.clone()], out_dir);
+            process_batch(std::slice::from_ref(&args.input), out_dir);
         } else {
-            match hwp_text_extract::extract_text_from_file(&args.input) {
+            match hwarang::extract_text_from_file(&args.input) {
                 Ok(text) => print!("{}", text),
                 Err(e) => {
                     eprintln!("Error: {}", e);

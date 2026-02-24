@@ -1,4 +1,4 @@
-use byteorder::{BigEndian, ReadBytesExt};
+use byteorder::{LittleEndian, ReadBytesExt};
 
 /// 컨트롤 ID 상수 (4바이트, big-endian ASCII)
 pub const CTRL_TABLE: u32 = make_ctrl_id(b"tbl ");
@@ -21,7 +21,7 @@ pub fn read_ctrl_id(data: &[u8]) -> Option<u32> {
     if data.len() < 4 {
         return None;
     }
-    Some((&data[..4]).read_u32::<BigEndian>().ok()?)
+    (&data[..4]).read_u32::<LittleEndian>().ok()
 }
 
 /// 컨트롤 ID → 이름 (디버그용)
@@ -67,7 +67,8 @@ mod tests {
 
     #[test]
     fn test_read_ctrl_id() {
-        let data = [0x74, 0x62, 0x6C, 0x20]; // "tbl "
+        // HWP 바이너리는 리틀엔디안: "tbl " = 0x74626C20 → LE bytes [0x20, 0x6C, 0x62, 0x74]
+        let data = [0x20, 0x6C, 0x62, 0x74];
         assert_eq!(read_ctrl_id(&data), Some(CTRL_TABLE));
     }
 }
