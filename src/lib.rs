@@ -5,7 +5,9 @@ pub mod hwpx;
 
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use rayon::prelude::*;
 
 use crate::error::{HwpError, Result};
 use crate::extract as text_extract;
@@ -56,6 +58,9 @@ pub fn extract_text_from_file(path: &Path) -> Result<String> {
 }
 
 /// HWP(OLE 컨테이너) 파일에서 텍스트를 추출한다.
+///
+/// 섹션별 병렬 처리: CFB 스트림 I/O 후 압축해제·파싱·텍스트 추출을
+/// rayon으로 병렬 수행한다.
 fn extract_text_from_hwp(path: &Path) -> Result<String> {
     let file = File::open(path)?;
     let mut comp = cfb::CompoundFile::open(file)?;
@@ -69,7 +74,6 @@ fn extract_text_from_hwp(path: &Path) -> Result<String> {
     };
 
     // DocInfo에서 section_count 파싱
-    // 배포문서도 DocInfo는 일반 방식으로 읽음
     let doc_info = {
         let mut s = comp
             .open_stream("/DocInfo")
@@ -79,39 +83,57 @@ fn extract_text_from_hwp(path: &Path) -> Result<String> {
         docinfo::parse_doc_info(&records)?
     };
 
-    // 배포문서: ViewText 사용, 일반문서: BodyText 사용
     let storage = if header.distribution {
         "ViewText"
     } else {
         "BodyText"
     };
 
-    // 각 섹션에서 텍스트 추출
-    let mut text = String::new();
+    // Phase 1: 모든 섹션의 raw 스트림 데이터를 순차 읽기 (CFB I/O)
+    let mut section_raw: Vec<(u16, Vec<u8>)> = Vec::new();
     for i in 0..doc_info.section_count {
         let stream_name = format!("/{}/Section{}", storage, i);
         let mut s = match comp.open_stream(&stream_name) {
             Ok(s) => s,
             Err(_) => continue,
         };
-
-        let data = if header.distribution {
-            // 배포문서: 스트림 데이터를 읽고 → 복호화 → 압축해제
-            let raw = stream::read_stream_data(&mut s)?;
-            let decrypted = crypto::decrypt_distribution_stream(&raw)?;
-            if header.compressed {
-                stream::decompress(&decrypted)?
-            } else {
-                decrypted
-            }
-        } else {
-            // 일반문서: 압축해제만
-            stream::read_and_decompress(&mut s, header.compressed)?
-        };
-
-        let records = record::read_records(&data)?;
-        text_extract::extract_section_text(&records, &mut text);
+        let raw = stream::read_stream_data(&mut s)?;
+        section_raw.push((i, raw));
     }
+
+    // Phase 2: 섹션별 병렬 처리 (압축해제 + 레코드 파싱 + 텍스트 추출)
+    let compressed = header.compressed;
+    let distribution = header.distribution;
+
+    let mut section_texts: Vec<(u16, String)> = section_raw
+        .into_par_iter()
+        .map(|(i, raw)| {
+            let data = if distribution {
+                let decrypted = crypto::decrypt_distribution_stream(&raw)?;
+                if compressed {
+                    stream::decompress(&decrypted)?
+                } else {
+                    decrypted
+                }
+            } else if compressed {
+                stream::decompress(&raw)?
+            } else {
+                raw
+            };
+
+            let records = record::read_records(&data)?;
+            let mut text = String::new();
+            text_extract::extract_section_text(&records, &mut text);
+            Ok((i, text))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // Phase 3: 섹션 순서대로 병합
+    section_texts.sort_unstable_by_key(|(i, _)| *i);
+    let text = section_texts
+        .into_iter()
+        .map(|(_, t)| t)
+        .collect::<String>();
 
     Ok(text)
 }
@@ -143,6 +165,55 @@ pub fn list_streams(path: &Path) -> Result<Vec<String>> {
         .walk()
         .map(|e| e.path().to_string_lossy().into_owned())
         .collect())
+}
+
+/// The outcome of extracting text from a single file in a batch operation.
+///
+/// Used by [`extract_text_batch`] to report per-file success or failure
+/// without aborting the entire batch.
+#[derive(Debug)]
+pub struct BatchResult {
+    /// The path of the processed file.
+    pub path: PathBuf,
+    /// Extracted text on success, or the error that occurred.
+    pub result: Result<String>,
+}
+
+/// Extracts text from multiple HWP/HWPX files in parallel.
+///
+/// Every file is processed concurrently using rayon's work-stealing
+/// scheduler. Within each file, sections are also processed in parallel
+/// (see [`extract_text_from_file`]), so all available CPU cores are
+/// fully utilised even when the input contains only a handful of
+/// large documents.
+///
+/// The returned [`Vec<BatchResult>`] preserves the input order.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::path::PathBuf;
+///
+/// let paths = vec![
+///     PathBuf::from("a.hwp"),
+///     PathBuf::from("b.hwpx"),
+/// ];
+/// let results = hwarang::extract_text_batch(&paths);
+/// for br in &results {
+///     match &br.result {
+///         Ok(text) => println!("{}: {} chars", br.path.display(), text.len()),
+///         Err(e) => eprintln!("{}: {}", br.path.display(), e),
+///     }
+/// }
+/// ```
+pub fn extract_text_batch(paths: &[PathBuf]) -> Vec<BatchResult> {
+    paths
+        .par_iter()
+        .map(|path| BatchResult {
+            path: path.clone(),
+            result: extract_text_from_file(path),
+        })
+        .collect()
 }
 
 #[cfg(test)]

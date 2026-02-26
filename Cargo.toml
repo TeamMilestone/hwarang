@@ -19,15 +19,15 @@ aes = "0.8"
 ecb = { version = "0.1", features = ["alloc"] }
 zip = "2"
 quick-xml = "0.37"
+rayon = "1"
 
 # CLI-only dependencies
-rayon = { version = "1", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 anyhow = { version = "1", optional = true }
 
 [features]
 default = ["cli"]
-cli = ["dep:rayon", "dep:clap", "dep:anyhow"]
+cli = ["dep:clap", "dep:anyhow"]
 
 [[bin]]
 name = "hwarang"

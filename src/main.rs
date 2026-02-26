@@ -1,11 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use clap::Parser;
-use rayon::prelude::*;
 
 #[derive(Parser, Debug)]
 #[command(name = "hwarang", about = "HWP/HWPX 문서 텍스트 추출기")]
@@ -59,36 +57,36 @@ fn collect_hwp_files(dir: &Path, recursive: bool) -> Vec<PathBuf> {
 fn process_batch(files: &[PathBuf], output_dir: &Path) {
     let start = Instant::now();
     let total = files.len();
-    let success = AtomicUsize::new(0);
-    let failed = AtomicUsize::new(0);
 
-    files
-        .par_iter()
-        .for_each(|path| match hwarang::extract_text_from_file(path) {
+    let results = hwarang::extract_text_batch(files);
+
+    let mut success = 0usize;
+    let mut failed = 0usize;
+    for br in &results {
+        match &br.result {
             Ok(text) => {
-                let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                let stem = br.path.file_stem().unwrap_or_default().to_string_lossy();
                 let out_path = output_dir.join(format!("{}.txt", stem));
-                if let Err(e) = fs::write(&out_path, &text) {
-                    eprintln!("WRITE_ERR\t{}\t{}", path.display(), e);
-                    failed.fetch_add(1, Ordering::Relaxed);
+                if let Err(e) = fs::write(&out_path, text) {
+                    eprintln!("WRITE_ERR\t{}\t{}", br.path.display(), e);
+                    failed += 1;
                 } else {
-                    success.fetch_add(1, Ordering::Relaxed);
+                    success += 1;
                 }
             }
             Err(e) => {
-                eprintln!("EXTRACT_ERR\t{}\t{}", path.display(), e);
-                failed.fetch_add(1, Ordering::Relaxed);
+                eprintln!("EXTRACT_ERR\t{}\t{}", br.path.display(), e);
+                failed += 1;
             }
-        });
+        }
+    }
 
     let elapsed = start.elapsed();
-    let ok = success.load(Ordering::Relaxed);
-    let fail = failed.load(Ordering::Relaxed);
     eprintln!(
         "Done: {}/{} succeeded, {} failed, {:.2}s ({:.0} files/s)",
-        ok,
+        success,
         total,
-        fail,
+        failed,
         elapsed.as_secs_f64(),
         total as f64 / elapsed.as_secs_f64()
     );
@@ -97,14 +95,16 @@ fn process_batch(files: &[PathBuf], output_dir: &Path) {
 fn process_batch_with_structure(files: &[PathBuf], base_dir: &Path, output_dir: &Path) {
     let start = Instant::now();
     let total = files.len();
-    let success = AtomicUsize::new(0);
-    let failed = AtomicUsize::new(0);
 
-    files.par_iter().for_each(|path| {
-        match hwarang::extract_text_from_file(path) {
+    let results = hwarang::extract_text_batch(files);
+
+    let mut success = 0usize;
+    let mut failed = 0usize;
+    for br in &results {
+        match &br.result {
             Ok(text) => {
                 // 입력 디렉토리 기준 상대 경로 유지
-                let rel = path.strip_prefix(base_dir).unwrap_or(path);
+                let rel = br.path.strip_prefix(base_dir).unwrap_or(&br.path);
                 let mut out_path = output_dir.join(rel);
                 out_path.set_extension("txt");
 
@@ -112,28 +112,26 @@ fn process_batch_with_structure(files: &[PathBuf], base_dir: &Path, output_dir: 
                     let _ = fs::create_dir_all(parent);
                 }
 
-                if let Err(e) = fs::write(&out_path, &text) {
-                    eprintln!("WRITE_ERR\t{}\t{}", path.display(), e);
-                    failed.fetch_add(1, Ordering::Relaxed);
+                if let Err(e) = fs::write(&out_path, text) {
+                    eprintln!("WRITE_ERR\t{}\t{}", br.path.display(), e);
+                    failed += 1;
                 } else {
-                    success.fetch_add(1, Ordering::Relaxed);
+                    success += 1;
                 }
             }
             Err(e) => {
-                eprintln!("EXTRACT_ERR\t{}\t{}", path.display(), e);
-                failed.fetch_add(1, Ordering::Relaxed);
+                eprintln!("EXTRACT_ERR\t{}\t{}", br.path.display(), e);
+                failed += 1;
             }
         }
-    });
+    }
 
     let elapsed = start.elapsed();
-    let ok = success.load(Ordering::Relaxed);
-    let fail = failed.load(Ordering::Relaxed);
     eprintln!(
         "Done: {}/{} succeeded, {} failed, {:.2}s ({:.0} files/s)",
-        ok,
+        success,
         total,
-        fail,
+        failed,
         elapsed.as_secs_f64(),
         total as f64 / elapsed.as_secs_f64()
     );

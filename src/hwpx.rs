@@ -4,10 +4,13 @@ use std::path::Path;
 
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
+use rayon::prelude::*;
 
 use crate::error::{HwpError, Result};
 
 /// HWPX (ZIP-based OWPML) 파일에서 텍스트를 추출한다.
+///
+/// 섹션별 병렬 처리: ZIP 엔트리 I/O 후 XML 파싱을 rayon으로 병렬 수행한다.
 pub fn extract_text_from_hwpx(path: &Path) -> Result<String> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
@@ -21,15 +24,15 @@ pub fn extract_text_from_hwpx(path: &Path) -> Result<String> {
             .by_index(i)
             .map_err(|e| HwpError::Hwpx(format!("ZIP entry: {}", e)))?;
         let name = entry.name().to_string();
-        // Contents/section0.xml, Contents/section1.xml, ...
         if name.starts_with("Contents/section") && name.ends_with(".xml") {
             section_names.push(name);
         }
     }
     section_names.sort();
 
-    let mut text = String::new();
-    for section_name in &section_names {
+    // Phase 1: 모든 섹션 XML을 순차 읽기 (ZIP I/O)
+    let mut section_xmls: Vec<(usize, String)> = Vec::new();
+    for (idx, section_name) in section_names.iter().enumerate() {
         let mut entry = archive
             .by_name(section_name)
             .map_err(|e| HwpError::Hwpx(format!("ZIP entry '{}': {}", section_name, e)))?;
@@ -39,8 +42,25 @@ pub fn extract_text_from_hwpx(path: &Path) -> Result<String> {
             .read_to_string(&mut xml_data)
             .map_err(|e| HwpError::Hwpx(format!("read section XML: {}", e)))?;
 
-        extract_section_xml(&xml_data, &mut text)?;
+        section_xmls.push((idx, xml_data));
     }
+
+    // Phase 2: 섹션별 XML 파싱을 병렬 수행
+    let mut section_texts: Vec<(usize, String)> = section_xmls
+        .into_par_iter()
+        .map(|(idx, xml_data)| {
+            let mut text = String::new();
+            extract_section_xml(&xml_data, &mut text)?;
+            Ok((idx, text))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // Phase 3: 섹션 순서대로 병합
+    section_texts.sort_unstable_by_key(|(i, _)| *i);
+    let text = section_texts
+        .into_iter()
+        .map(|(_, t)| t)
+        .collect::<String>();
 
     Ok(text)
 }
