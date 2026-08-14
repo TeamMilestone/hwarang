@@ -1,6 +1,6 @@
 # hwarang
 
-HWP/HWPX 문서에서 텍스트를 빠르게 추출하는 Rust crate입니다.
+HWP/HWPX/DOCX 문서에서 텍스트를 빠르게 추출하는 Rust crate입니다.
 
 ## 배경
 
@@ -14,6 +14,7 @@ hwarang은 이러한 필요에서 출발하여 Rust로 작성되었으며, 병�
 - **HWP 3.0** (레거시 바이너리) - 한/글 3.0~97 (`HWP Document File V3.00` 시그니처)
 - **HWPX** (ZIP/XML) - 한/글 최신 XML 기반 포맷
 - **HWPML** (순수 XML)
+- **DOCX** (ZIP/OOXML) - Microsoft Word 2007+ (WordprocessingML)
 
 ## 주요 기능
 
@@ -43,6 +44,9 @@ hwarang은 이러한 필요에서 출발하여 Rust로 작성되었으며, 병�
 | 확장자 불일치 | `.hwp` 확장자이지만 실제로는 HTML 또는 일반 텍스트 |
 | DRM 래핑 | 소프트캠프(SCDSA), DOCUMENTSAFER 등 문서보안 솔루션이 씌워진 파일 |
 | 깨진 XML | HWPML 형식이나 XML 구문 자체가 손상된 파일 |
+
+DOCX는 100KB급 공고문 기준 파일당 약 0.6ms(단일 스레드), 배치 병렬 처리 시
+약 4,000 files/s로 처리됩니다 (Apple Silicon 8코어).
 
 ## 설치
 

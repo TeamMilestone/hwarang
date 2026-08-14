@@ -1,3 +1,4 @@
+pub mod docx;
 pub mod error;
 pub mod extract;
 pub mod hwp;
@@ -5,7 +6,7 @@ pub mod hwp30;
 pub mod hwpx;
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
@@ -18,11 +19,12 @@ use crate::hwp::header::FileHeader;
 use crate::hwp::record;
 use crate::hwp::stream;
 
-/// Extracts text content from an HWP or HWPX document file.
+/// Extracts text content from an HWP, HWPX, or DOCX document file.
 ///
 /// Automatically detects the file format by reading the magic bytes:
 /// - `D0 CF 11 E0` — HWP 5.x (OLE compound document)
-/// - `50 4B 03 04` — HWPX (ZIP-based OWPML)
+/// - `50 4B 03 04` — ZIP container: HWPX (OWPML) or DOCX (OOXML),
+///   distinguished by the archive contents (`word/document.xml` → DOCX)
 /// - `3C 3F 78 6D` — HWPML (plain XML)
 /// - `48 57 50 20` (`"HWP "`) — HWP 3.0 (한글 3.0~97 binary format)
 ///
@@ -52,11 +54,28 @@ pub fn extract_text_from_file(path: &Path) -> Result<String> {
     }
 
     match magic {
-        [0x50, 0x4B, 0x03, 0x04] => hwpx::extract_text_from_hwpx(path), // ZIP (HWPX)
-        [0xD0, 0xCF, 0x11, 0xE0] => extract_text_from_hwp(path),        // OLE (HWP 5.x)
+        [0x50, 0x4B, 0x03, 0x04] => extract_text_from_zip(path), // ZIP (HWPX/DOCX)
+        [0xD0, 0xCF, 0x11, 0xE0] => extract_text_from_hwp(path), // OLE (HWP 5.x)
         [0x3C, 0x3F, 0x78, 0x6D] => hwpx::extract_text_from_hwpml(path), // <?xml (HWPML)
         [0x48, 0x57, 0x50, 0x20] => hwp30::extract_text_from_hwp30(path), // "HWP " (HWP 3.0)
         _ => Err(HwpError::UnsupportedFormat),
+    }
+}
+
+/// ZIP 컨테이너 파일에서 텍스트를 추출한다.
+///
+/// 아카이브 내용으로 포맷을 판별한다:
+/// `word/document.xml` 존재 → DOCX, 그 외 → HWPX.
+fn extract_text_from_zip(path: &Path) -> Result<String> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut archive =
+        zip::ZipArchive::new(reader).map_err(|e| HwpError::Hwpx(format!("ZIP open: {}", e)))?;
+
+    if archive.file_names().any(|n| n == "word/document.xml") {
+        docx::extract_text_from_archive(&mut archive)
+    } else {
+        hwpx::extract_text_from_archive(&mut archive)
     }
 }
 

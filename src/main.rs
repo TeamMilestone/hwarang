@@ -6,9 +6,9 @@ use std::time::Instant;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "hwarang", about = "HWP/HWPX 문서 텍스트 추출기")]
+#[command(name = "hwarang", about = "HWP/HWPX/DOCX 문서 텍스트 추출기")]
 struct Args {
-    /// 입력 HWP/HWPX 파일 또는 디렉토리
+    /// 입력 HWP/HWPX/DOCX 파일 또는 디렉토리
     input: PathBuf,
 
     /// 출력 디렉토리 (지정 시 파일별 .txt 생성)
@@ -44,10 +44,11 @@ fn collect_hwp_files(dir: &Path, recursive: bool) -> Vec<PathBuf> {
             if recursive {
                 files.extend(collect_hwp_files(&path, true));
             }
-        } else if path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("hwp") || ext.eq_ignore_ascii_case("hwpx"))
-        {
+        } else if path.extension().is_some_and(|ext| {
+            ext.eq_ignore_ascii_case("hwp")
+                || ext.eq_ignore_ascii_case("hwpx")
+                || ext.eq_ignore_ascii_case("docx")
+        }) {
             files.push(path);
         }
     }

@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 
 use quick_xml::events::Event;
@@ -16,7 +16,13 @@ pub fn extract_text_from_hwpx(path: &Path) -> Result<String> {
     let reader = BufReader::new(file);
     let mut archive =
         zip::ZipArchive::new(reader).map_err(|e| HwpError::Hwpx(format!("ZIP open: {}", e)))?;
+    extract_text_from_archive(&mut archive)
+}
 
+/// 이미 열린 ZIP 아카이브에서 HWPX 텍스트를 추출한다.
+pub(crate) fn extract_text_from_archive<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<String> {
     // section*.xml 파일들 찾기 (정렬)
     let mut section_names: Vec<String> = Vec::new();
     for i in 0..archive.len() {

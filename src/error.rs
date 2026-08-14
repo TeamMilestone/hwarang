@@ -46,6 +46,10 @@ pub enum HwpError {
     /// An error specific to HWPX (ZIP/XML) processing.
     #[error("HWPX error: {0}")]
     Hwpx(String),
+
+    /// An error specific to DOCX (ZIP/XML) processing.
+    #[error("DOCX error: {0}")]
+    Docx(String),
 }
 
 /// A specialised `Result` type for HWP operations.
