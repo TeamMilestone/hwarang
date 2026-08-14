@@ -1,6 +1,7 @@
 pub mod error;
 pub mod extract;
 pub mod hwp;
+pub mod hwp30;
 pub mod hwpx;
 
 use std::fs::File;
@@ -20,9 +21,10 @@ use crate::hwp::stream;
 /// Extracts text content from an HWP or HWPX document file.
 ///
 /// Automatically detects the file format by reading the magic bytes:
-/// - `D0 CF 11 E0` — HWP (OLE compound document)
+/// - `D0 CF 11 E0` — HWP 5.x (OLE compound document)
 /// - `50 4B 03 04` — HWPX (ZIP-based OWPML)
 /// - `3C 3F 78 6D` — HWPML (plain XML)
+/// - `48 57 50 20` (`"HWP "`) — HWP 3.0 (한글 3.0~97 binary format)
 ///
 /// # Errors
 ///
@@ -51,8 +53,9 @@ pub fn extract_text_from_file(path: &Path) -> Result<String> {
 
     match magic {
         [0x50, 0x4B, 0x03, 0x04] => hwpx::extract_text_from_hwpx(path), // ZIP (HWPX)
-        [0xD0, 0xCF, 0x11, 0xE0] => extract_text_from_hwp(path),        // OLE (HWP)
+        [0xD0, 0xCF, 0x11, 0xE0] => extract_text_from_hwp(path),        // OLE (HWP 5.x)
         [0x3C, 0x3F, 0x78, 0x6D] => hwpx::extract_text_from_hwpml(path), // <?xml (HWPML)
+        [0x48, 0x57, 0x50, 0x20] => hwp30::extract_text_from_hwp30(path), // "HWP " (HWP 3.0)
         _ => Err(HwpError::UnsupportedFormat),
     }
 }
