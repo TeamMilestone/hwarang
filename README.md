@@ -10,7 +10,8 @@ hwarang은 이러한 필요에서 출발하여 Rust로 작성되었으며, 병�
 
 ## 지원 포맷
 
-- **HWP** (OLE 바이너리) - 한/글 5.x 이상
+- **HWP 5.x** (OLE 바이너리) - 한/글 5.x 이상
+- **HWP 3.0** (레거시 바이너리) - 한/글 3.0~97 (`HWP Document File V3.00` 시그니처)
 - **HWPX** (ZIP/XML) - 한/글 최신 XML 기반 포맷
 - **HWPML** (순수 XML)
 
