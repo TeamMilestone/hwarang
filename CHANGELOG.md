@@ -5,6 +5,30 @@
 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/)를 따르며,
 버전은 [Semantic Versioning](https://semver.org/lang/ko/)을 준수합니다.
 
+## [0.4.0] - 2026-08-14
+
+### Added
+
+- **DOCX(OOXML WordprocessingML) 텍스트 추출 지원**
+  - ZIP 매직 바이트 공유 문제 해결: `PK` 시그니처 파일은 아카이브 내용으로
+    판별 (`word/document.xml` 존재 → DOCX, 그 외 → HWPX)
+  - `w:t` 텍스트, `w:br`/`w:cr` 줄바꿈, `w:tab` 탭, `w:noBreakHyphen` 추출
+  - `xml:space="preserve"` 미지정 시 가장자리 공백 정규화
+    (LibreOffice writerfilter 동작 참조)
+  - 표(`w:tbl`)를 마크다운 테이블로 변환, 중첩 표는 바깥 셀 텍스트로 병합
+  - 필드 커맨드(`w:fldChar` begin~separate, `w:instrText`), 삭제된 변경
+    추적 텍스트(`w:delText`), `mc:Fallback` 중복 콘텐츠, 루비 발음(`w:rt`)
+    제외
+  - 각주/미주(`word/footnotes.xml`/`endnotes.xml`) 추출 — separator 더미
+    항목 제외
+  - CLI 디렉토리 모드에서 `.docx` 확장자 수집
+- 실물 DOCX 문서 픽스처(기업마당 공고문) 및 통합 테스트
+
+### Notes
+
+- DOCX 처리 속도: 100KB급 공고문 기준 파일당 약 0.6ms (단일 스레드),
+  배치 병렬 처리 시 약 4,000 files/s (Apple Silicon 8코어)
+
 ## [0.3.0] - 2026-08-14
 
 ### Added
