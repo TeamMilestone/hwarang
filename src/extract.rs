@@ -315,6 +315,14 @@ fn extract_table_subtree(records: &[Record], start: usize, end: usize, text: &mu
         }
     }
 
+    // 1×1 표는 테두리 상자다 — 줄을 살려 본문처럼 쓴다 (0.4.1)
+    if rows == 1 && cols == 1 {
+        if let Some((_, _, cell)) = cells.first() {
+            crate::hwpx::push_box(cell, text);
+        }
+        return;
+    }
+
     let table_str = format_markdown_table(&cells, rows, cols);
     text.push_str(&table_str);
 }

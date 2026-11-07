@@ -330,6 +330,13 @@ fn emit_markdown_table(rows: &[Vec<String>], text: &mut String) {
     if rows.is_empty() {
         return;
     }
+    // 1×1 표는 테두리 상자다 — 줄을 살려 본문처럼 쓴다 (0.4.1)
+    if let [row] = rows {
+        if let [cell] = row.as_slice() {
+            crate::hwpx::push_box(cell, text);
+            return;
+        }
+    }
 
     let col_count = rows.iter().map(|r| r.len()).max().unwrap_or(0);
     if col_count == 0 {
@@ -449,7 +456,7 @@ mod tests {
     #[test]
     fn test_nested_table_merged_into_cell() {
         let xml = format!(
-            r#"<w:document {W_NS}><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>바깥</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>안쪽</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>"#
+            r#"<w:document {W_NS}><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>바깥</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>안쪽</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/></w:tc><w:tc><w:p><w:r><w:t>옆</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#
         );
         let mut text = String::new();
         extract_document_xml(&xml, &mut text).unwrap();
@@ -457,7 +464,22 @@ mod tests {
         assert!(text.contains("바깥"), "got: {text:?}");
         assert!(text.contains("안쪽"), "got: {text:?}");
         // 마크다운 구분선은 최상위 표 하나만
-        assert_eq!(text.matches("---").count(), 1, "got: {text:?}");
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("| ---")).count(),
+            1,
+            "got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn test_single_cell_table_is_a_box() {
+        let xml = format!(
+            r#"<w:document {W_NS}><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>1. 입찰개요</w:t></w:r></w:p><w:p><w:r><w:t>2. 참가자격</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#
+        );
+        let mut text = String::new();
+        extract_document_xml(&xml, &mut text).unwrap();
+        assert!(text.contains("1. 입찰개요\n2. 참가자격\n"), "got: {text:?}");
+        assert!(!text.contains("---"), "got: {text:?}");
     }
 
     #[test]

@@ -72,93 +72,44 @@ pub(crate) fn extract_text_from_archive<R: Read + Seek>(
 }
 
 /// 섹션 XML에서 텍스트를 추출한다.
-/// <hp:p> → 줄바꿈, <hp:t> → 텍스트 수집
+/// <hp:p> → 줄바꿈, <hp:t> → 텍스트 수집, <hp:tbl> → 표 (표 안의 표도 바깥 셀에 넣는다)
 fn extract_section_xml(xml: &str, text: &mut String) -> Result<()> {
     let mut reader = Reader::from_str(xml);
     let mut in_t_tag = false;
-    let mut para_has_text = false;
+    let mut out = TextBuilder::default();
     let mut buf = Vec::new();
-
-    // 표 추적
-    let mut in_table = false;
-    let mut in_tc = false;
-    let mut table_rows: Vec<Vec<String>> = Vec::new();
-    let mut current_row: Vec<String> = Vec::new();
-    let mut current_cell_text = String::new();
-    let mut tc_para_has_text = false;
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                let local_name = e.local_name();
-                let name = local_name.as_ref();
-                if name == b"t" {
-                    in_t_tag = true;
-                } else if name == b"tbl" {
-                    in_table = true;
-                    table_rows.clear();
-                } else if name == b"tc" {
-                    in_tc = true;
-                    current_cell_text.clear();
-                    tc_para_has_text = false;
-                } else if name == b"tr" && in_table {
-                    current_row.clear();
-                } else if name == b"p" {
-                    if in_tc {
-                        tc_para_has_text = false;
-                    } else {
-                        para_has_text = false;
-                    }
+            Ok(Event::Start(ref e)) => match e.local_name().as_ref() {
+                b"t" => in_t_tag = true,
+                b"tbl" => out.table_start(),
+                b"tr" => out.row_start(),
+                b"tc" => out.cell_start(),
+                b"p" => out.para_start(),
+                _ => {}
+            },
+            // 빈 요소는 열고 닫은 것으로 본다. 빈 <hp:t/> 는 글이 없다
+            Ok(Event::Empty(ref e)) => {
+                if e.local_name().as_ref() == b"tc" {
+                    out.cell_start();
+                    out.cell_end();
                 }
             }
-            Ok(Event::End(ref e)) => {
-                let local_name = e.local_name();
-                let name = local_name.as_ref();
-                if name == b"t" {
-                    in_t_tag = false;
-                } else if name == b"p" {
-                    if in_tc {
-                        if tc_para_has_text {
-                            current_cell_text.push('\n');
-                        }
-                    } else if !in_table {
-                        if para_has_text {
-                            text.push('\n');
-                        } else {
-                            text.push_str("\n\n");
-                        }
-                    }
-                } else if name == b"tc" {
-                    // 셀 텍스트 끝의 줄바꿈 제거
-                    let trimmed = current_cell_text.trim_end_matches('\n').to_string();
-                    current_row.push(trimmed);
-                    in_tc = false;
-                } else if name == b"tr" && in_table {
-                    if !current_row.is_empty() {
-                        table_rows.push(std::mem::take(&mut current_row));
-                    }
-                } else if name == b"tbl" {
-                    emit_hwpx_markdown_table(&table_rows, text);
-                    table_rows.clear();
-                    in_table = false;
-                }
-            }
+            Ok(Event::End(ref e)) => match e.local_name().as_ref() {
+                b"t" => in_t_tag = false,
+                b"p" => out.para_end(),
+                b"tc" => out.cell_end(),
+                b"tr" => out.row_end(),
+                b"tbl" => out.table_end(),
+                _ => {}
+            },
             Ok(Event::Text(ref e)) => {
                 if in_t_tag {
                     let t = e
                         .unescape()
                         .map_err(|err| HwpError::Hwpx(format!("XML unescape: {}", err)))?;
-                    if in_tc {
-                        if !t.is_empty() {
-                            tc_para_has_text = true;
-                        }
-                        current_cell_text.push_str(&t);
-                    } else if !in_table {
-                        if !t.is_empty() {
-                            para_has_text = true;
-                        }
-                        text.push_str(&t);
-                    }
+                    out.push_text(&t);
                 }
             }
             Ok(Event::Eof) => break,
@@ -174,13 +125,150 @@ fn extract_section_xml(xml: &str, text: &mut String) -> Result<()> {
         buf.clear();
     }
 
+    text.push_str(&out.finish());
     Ok(())
+}
+
+/// 표 안의 표까지 다루는 본문 모음.
+///
+/// 열린 표를 바깥에서 안쪽 순서로 쌓고, 표가 끝나면 그 표를 감싼 셀(없으면 본문)에 쓴다.
+/// 0.4.0 까지는 표 상태를 하나만 들고 있어, 안쪽 표가 시작될 때 바깥 셀에 모은 글을 지웠다
+/// (문서 전체를 1×1 표로 감싼 공고문은 본문이 통째로 빠졌다).
+#[derive(Default)]
+struct TextBuilder {
+    text: String,
+    para_has_text: bool,
+    tables: Vec<OpenTable>,
+}
+
+#[derive(Default)]
+struct OpenTable {
+    rows: Vec<Vec<String>>,
+    row: Vec<String>,
+    /// 열린 셀의 글
+    cell: Option<String>,
+    cell_para_has_text: bool,
+}
+
+impl TextBuilder {
+    fn table_start(&mut self) {
+        self.tables.push(OpenTable::default());
+    }
+
+    fn row_start(&mut self) {
+        if let Some(t) = self.tables.last_mut() {
+            t.row.clear();
+        }
+    }
+
+    fn cell_start(&mut self) {
+        if let Some(t) = self.tables.last_mut() {
+            t.cell = Some(String::new());
+            t.cell_para_has_text = false;
+        }
+    }
+
+    fn para_start(&mut self) {
+        match self.tables.last_mut() {
+            Some(t) => t.cell_para_has_text = false,
+            None => self.para_has_text = false,
+        }
+    }
+
+    fn para_end(&mut self) {
+        match self.tables.last_mut() {
+            Some(t) => {
+                if let Some(cell) = t.cell.as_mut() {
+                    if t.cell_para_has_text {
+                        cell.push('\n');
+                    }
+                }
+            }
+            None => {
+                if self.para_has_text {
+                    self.text.push('\n');
+                } else {
+                    self.text.push_str("\n\n");
+                }
+            }
+        }
+    }
+
+    fn push_text(&mut self, s: &str) {
+        match self.tables.last_mut() {
+            Some(t) => {
+                if let Some(cell) = t.cell.as_mut() {
+                    if !s.is_empty() {
+                        t.cell_para_has_text = true;
+                    }
+                    cell.push_str(s);
+                }
+            }
+            None => {
+                if !s.is_empty() {
+                    self.para_has_text = true;
+                }
+                self.text.push_str(s);
+            }
+        }
+    }
+
+    fn cell_end(&mut self) {
+        if let Some(t) = self.tables.last_mut() {
+            if let Some(cell) = t.cell.take() {
+                t.row.push(cell.trim_end_matches('\n').to_string());
+            }
+        }
+    }
+
+    fn row_end(&mut self) {
+        if let Some(t) = self.tables.last_mut() {
+            if !t.row.is_empty() {
+                let row = std::mem::take(&mut t.row);
+                t.rows.push(row);
+            }
+        }
+    }
+
+    fn table_end(&mut self) {
+        let Some(table) = self.tables.pop() else {
+            return;
+        };
+        let mut rendered = String::new();
+        emit_hwpx_markdown_table(&table.rows, &mut rendered);
+        self.write_block(&rendered);
+    }
+
+    /// 끝난 표를 감싼 셀에 쓴다. 감싼 셀이 없으면 본문에 쓴다.
+    fn write_block(&mut self, block: &str) {
+        match self.tables.iter_mut().rev().find_map(|t| t.cell.as_mut()) {
+            Some(cell) => cell.push_str(block),
+            None => self.text.push_str(block),
+        }
+    }
+
+    fn finish(mut self) -> String {
+        // 닫히지 않은 표(손상된 XML)도 모은 글은 버리지 않는다
+        while !self.tables.is_empty() {
+            self.cell_end();
+            self.row_end();
+            self.table_end();
+        }
+        self.text
+    }
 }
 
 /// HWPX 표 데이터를 마크다운 테이블로 출력
 fn emit_hwpx_markdown_table(rows: &[Vec<String>], text: &mut String) {
     if rows.is_empty() {
         return;
+    }
+    // 1×1 표는 테두리 상자다 — 줄을 살려 본문처럼 쓴다 (0.4.1)
+    if let [row] = rows {
+        if let [cell] = row.as_slice() {
+            push_box(cell, text);
+            return;
+        }
     }
 
     let col_count = rows.iter().map(|r| r.len()).max().unwrap_or(0);
@@ -227,92 +315,37 @@ pub fn extract_text_from_hwpml(path: &Path) -> Result<String> {
 }
 
 /// HWPML XML에서 텍스트를 추출한다.
-/// <P> → 줄바꿈, <CHAR> → 텍스트 수집
+/// <P> → 줄바꿈, <CHAR> → 텍스트 수집, <TABLE> → 표 (표 안의 표도 바깥 셀에 넣는다)
 fn extract_hwpml_xml(xml: &str, text: &mut String) -> Result<()> {
     let mut reader = Reader::from_str(xml);
     let mut in_char_tag = false;
-    let mut para_has_text = false;
+    let mut out = TextBuilder::default();
     let mut buf = Vec::new();
-
-    // 표 추적
-    let mut in_table = false;
-    let mut in_cell = false;
-    let mut table_rows: Vec<Vec<String>> = Vec::new();
-    let mut current_row: Vec<String> = Vec::new();
-    let mut current_cell_text = String::new();
-    let mut cell_para_has_text = false;
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => {
-                let local_name = e.local_name();
-                let name = local_name.as_ref();
-                if name == b"CHAR" {
-                    in_char_tag = true;
-                } else if name == b"TABLE" {
-                    in_table = true;
-                    table_rows.clear();
-                } else if name == b"CELL" {
-                    in_cell = true;
-                    current_cell_text.clear();
-                    cell_para_has_text = false;
-                } else if name == b"ROW" && in_table {
-                    current_row.clear();
-                } else if name == b"P" {
-                    if in_cell {
-                        cell_para_has_text = false;
-                    } else {
-                        para_has_text = false;
-                    }
-                }
-            }
-            Ok(Event::End(ref e)) => {
-                let local_name = e.local_name();
-                let name = local_name.as_ref();
-                if name == b"CHAR" {
-                    in_char_tag = false;
-                } else if name == b"P" {
-                    if in_cell {
-                        if cell_para_has_text {
-                            current_cell_text.push('\n');
-                        }
-                    } else if !in_table {
-                        if para_has_text {
-                            text.push('\n');
-                        } else {
-                            text.push_str("\n\n");
-                        }
-                    }
-                } else if name == b"CELL" {
-                    let trimmed = current_cell_text.trim_end_matches('\n').to_string();
-                    current_row.push(trimmed);
-                    in_cell = false;
-                } else if name == b"ROW" && in_table {
-                    if !current_row.is_empty() {
-                        table_rows.push(std::mem::take(&mut current_row));
-                    }
-                } else if name == b"TABLE" {
-                    emit_hwpx_markdown_table(&table_rows, text);
-                    table_rows.clear();
-                    in_table = false;
-                }
-            }
+            Ok(Event::Start(ref e)) => match e.local_name().as_ref() {
+                b"CHAR" => in_char_tag = true,
+                b"TABLE" => out.table_start(),
+                b"ROW" => out.row_start(),
+                b"CELL" => out.cell_start(),
+                b"P" => out.para_start(),
+                _ => {}
+            },
+            Ok(Event::End(ref e)) => match e.local_name().as_ref() {
+                b"CHAR" => in_char_tag = false,
+                b"P" => out.para_end(),
+                b"CELL" => out.cell_end(),
+                b"ROW" => out.row_end(),
+                b"TABLE" => out.table_end(),
+                _ => {}
+            },
             Ok(Event::Text(ref e)) => {
                 if in_char_tag {
                     let t = e
                         .unescape()
                         .map_err(|err| HwpError::Hwpx(format!("HWPML unescape: {}", err)))?;
-                    if in_cell {
-                        if !t.is_empty() {
-                            cell_para_has_text = true;
-                        }
-                        current_cell_text.push_str(&t);
-                    } else if !in_table {
-                        if !t.is_empty() {
-                            para_has_text = true;
-                        }
-                        text.push_str(&t);
-                    }
+                    out.push_text(&t);
                 }
             }
             Ok(Event::Eof) => break,
@@ -328,7 +361,18 @@ fn extract_hwpml_xml(xml: &str, text: &mut String) -> Result<()> {
         buf.clear();
     }
 
+    text.push_str(&out.finish());
     Ok(())
+}
+
+/// 1×1 표(테두리 상자)의 글을 본문처럼 쓴다. 빈 상자는 쓰지 않는다
+pub(crate) fn push_box(cell: &str, text: &mut String) {
+    let body = cell.trim_matches('\n');
+    if body.trim().is_empty() {
+        return;
+    }
+    text.push_str(body);
+    text.push('\n');
 }
 
 /// 마크다운 셀 텍스트 이스케이프: 줄바꿈 → 공백, | → \|
@@ -464,6 +508,74 @@ mod tests {
         assert!(text.contains("| A | B |"));
         assert!(text.contains("| --- | --- |"));
         assert!(text.contains("| C | D |"));
+    }
+
+    #[test]
+    fn test_nested_table_keeps_outer_cell_text() {
+        // 공고문 전체를 1×1 표로 감싸고 그 안에 2열 표가 있는 문서 (나라장터 R26BK01769227)
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hp:sec xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"><hp:p><hp:run><hp:tbl><hp:tr><hp:tc><hp:subList>
+<hp:p><hp:run><hp:t>한국농수산대학교 제2026-81호</hp:t></hp:run></hp:p>
+<hp:p><hp:run><hp:t>1. 입찰개요</hp:t></hp:run></hp:p>
+<hp:p><hp:run><hp:tbl><hp:tr><hp:tc><hp:subList><hp:p><hp:run><hp:t>계약보증금</hp:t></hp:run></hp:p></hp:subList></hp:tc><hp:tc><hp:subList><hp:p><hp:run><hp:t>10%</hp:t></hp:run></hp:p></hp:subList></hp:tc></hp:tr></hp:tbl></hp:run></hp:p>
+<hp:p><hp:run><hp:t>2. 입찰참가자격</hp:t></hp:run></hp:p>
+</hp:subList></hp:tc></hp:tr></hp:tbl></hp:run></hp:p></hp:sec>"#;
+        let mut text = String::new();
+        extract_section_xml(xml, &mut text).unwrap();
+        assert!(
+            text.starts_with("한국농수산대학교 제2026-81호\n1. 입찰개요\n| 계약보증금 | 10% |\n| --- | --- |\n2. 입찰참가자격\n"),
+            "got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn test_nested_table_inside_grid_cell_is_inlined() {
+        // 여러 칸 표 안의 표는 바깥 칸 한 줄에 들어간다 (HWP 바이너리와 같다)
+        let xml = r#"<hp:sec xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"><hp:p><hp:run><hp:tbl>
+<hp:tr><hp:tc><hp:p><hp:run><hp:t>구분</hp:t></hp:run></hp:p></hp:tc><hp:tc><hp:p><hp:run><hp:t>내용</hp:t></hp:run></hp:p></hp:tc></hp:tr>
+<hp:tr><hp:tc><hp:p><hp:run><hp:t>보증</hp:t></hp:run></hp:p></hp:tc><hp:tc><hp:p><hp:run><hp:t>앞</hp:t></hp:run></hp:p><hp:p><hp:run><hp:tbl><hp:tr><hp:tc><hp:p><hp:run><hp:t>A</hp:t></hp:run></hp:p></hp:tc><hp:tc><hp:p><hp:run><hp:t>B</hp:t></hp:run></hp:p></hp:tc></hp:tr></hp:tbl></hp:run></hp:p><hp:p><hp:run><hp:t>뒤</hp:t></hp:run></hp:p></hp:tc></hp:tr>
+</hp:tbl></hp:run></hp:p></hp:sec>"#;
+        let mut text = String::new();
+        extract_section_xml(xml, &mut text).unwrap();
+        assert!(
+            text.contains("| 구분 | 내용 |\n| --- | --- |\n"),
+            "got: {text:?}"
+        );
+        assert!(
+            text.contains(r"| 보증 | 앞 \| A \| B \| \| --- \| --- \| 뒤 |"),
+            "got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn test_single_cell_table_is_a_box() {
+        let rows = vec![vec![
+            "※ 공동수급은 허용하지 않습니다.\n면세사업자는 부가세 포함".to_string(),
+        ]];
+        let mut text = String::new();
+        emit_hwpx_markdown_table(&rows, &mut text);
+        assert_eq!(
+            text,
+            "※ 공동수급은 허용하지 않습니다.\n면세사업자는 부가세 포함\n"
+        );
+        let mut empty = String::new();
+        emit_hwpx_markdown_table(&[vec!["  ".to_string()]], &mut empty);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_hwpml_nested_table_keeps_outer_cell_text() {
+        let xml = r#"<HWPML><BODY><SECTION><P><TEXT><TABLE><ROW><CELL><PARALIST>
+<P><TEXT><CHAR>바깥 앞</CHAR></TEXT></P>
+<P><TEXT><TABLE><ROW><CELL><PARALIST><P><TEXT><CHAR>가</CHAR></TEXT></P></PARALIST></CELL><CELL><PARALIST><P><TEXT><CHAR>나</CHAR></TEXT></P></PARALIST></CELL></ROW></TABLE></TEXT></P>
+<P><TEXT><CHAR>바깥 뒤</CHAR></TEXT></P>
+</PARALIST></CELL></ROW></TABLE></TEXT></P></SECTION></BODY></HWPML>"#;
+        let mut text = String::new();
+        extract_hwpml_xml(xml, &mut text).unwrap();
+        assert!(
+            text.starts_with("바깥 앞\n| 가 | 나 |\n| --- | --- |\n바깥 뒤\n"),
+            "got: {text:?}"
+        );
     }
 
     #[test]
