@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::hwp::control;
@@ -10,19 +12,34 @@ use crate::hwp::record::{self, Record};
 /// 컨트롤 서브트리(표 셀, 각주, 텍스트박스 등)를 인라인으로 재귀 처리하여
 /// 문서 흐름 순서대로 텍스트를 출력한다.
 pub fn extract_section_text(records: &[Record], text: &mut String) {
+    extract_section_text_with(records, &HashMap::new(), text);
+}
+
+/// `border_fills`: 문서 정보의 테두리/배경 번호 → 투명인가. 네 변이 모두 없는 칸으로만 된 표 줄은 본문 줄로 쓴다 (0.5.0)
+pub fn extract_section_text_with(
+    records: &[Record],
+    border_fills: &HashMap<u16, crate::hwpx::Sides>,
+    text: &mut String,
+) {
     let mut pos = 0;
-    extract_para_list(records, &mut pos, 0, text);
+    extract_para_list(records, &mut pos, 0, border_fills, text);
 }
 
 /// 주어진 base_level의 PARA_HEADER 시퀀스를 처리한다.
-fn extract_para_list(records: &[Record], pos: &mut usize, base_level: u16, text: &mut String) {
+fn extract_para_list(
+    records: &[Record],
+    pos: &mut usize,
+    base_level: u16,
+    bf: &HashMap<u16, crate::hwpx::Sides>,
+    text: &mut String,
+) {
     while *pos < records.len() {
         let rec = &records[*pos];
         if rec.header.level < base_level {
             break;
         }
         if rec.header.tag_id == record::HWPTAG_PARA_HEADER && rec.header.level == base_level {
-            extract_para(records, pos, base_level, text);
+            extract_para(records, pos, base_level, bf, text);
         } else {
             *pos += 1;
         }
@@ -39,7 +56,13 @@ fn extract_para_list(records: &[Record], pos: &mut usize, base_level: u16, text:
 ///       TABLE level=L+2
 ///       LIST_HEADER level=L+2
 ///       PARA_HEADER level=L+2 (셀 내부)
-fn extract_para(records: &[Record], pos: &mut usize, level: u16, text: &mut String) {
+fn extract_para(
+    records: &[Record],
+    pos: &mut usize,
+    level: u16,
+    bf: &HashMap<u16, crate::hwpx::Sides>,
+    text: &mut String,
+) {
     // PARA_HEADER 스킵
     *pos += 1;
 
@@ -109,7 +132,7 @@ fn extract_para(records: &[Record], pos: &mut usize, level: u16, text: &mut Stri
         }
         if seg.has_control_after && ctrl_idx < all_ctrl_subtrees.len() {
             let (sub_start, sub_end) = all_ctrl_subtrees[ctrl_idx];
-            extract_ctrl_subtree(records, sub_start, sub_end, text);
+            extract_ctrl_subtree(records, sub_start, sub_end, bf, text);
             ctrl_idx += 1;
         }
     }
@@ -117,7 +140,7 @@ fn extract_para(records: &[Record], pos: &mut usize, level: u16, text: &mut Stri
     // 남은 ctrl_subtrees 처리
     while ctrl_idx < all_ctrl_subtrees.len() {
         let (sub_start, sub_end) = all_ctrl_subtrees[ctrl_idx];
-        extract_ctrl_subtree(records, sub_start, sub_end, text);
+        extract_ctrl_subtree(records, sub_start, sub_end, bf, text);
         ctrl_idx += 1;
     }
 
@@ -131,11 +154,17 @@ fn extract_para(records: &[Record], pos: &mut usize, level: u16, text: &mut Stri
 }
 
 /// 컨트롤 서브트리 내의 텍스트 추출 (표 셀, 각주, 텍스트박스 등)
-fn extract_ctrl_subtree(records: &[Record], start: usize, end: usize, text: &mut String) {
+fn extract_ctrl_subtree(
+    records: &[Record],
+    start: usize,
+    end: usize,
+    bf: &HashMap<u16, crate::hwpx::Sides>,
+    text: &mut String,
+) {
     // 표 컨트롤이면 마크다운 테이블로 출력
     if let Some(ctrl_id) = control::read_ctrl_id(&records[start].data) {
         if ctrl_id == control::CTRL_TABLE {
-            extract_table_subtree(records, start, end, text);
+            extract_table_subtree(records, start, end, bf, text);
             return;
         }
     }
@@ -149,7 +178,7 @@ fn extract_ctrl_subtree(records: &[Record], start: usize, end: usize, text: &mut
             // LIST_HEADER 다음에 PARA_HEADER가 오면 재귀 처리
             if i < end && records[i].header.tag_id == record::HWPTAG_PARA_HEADER {
                 let para_level = records[i].header.level;
-                extract_para_list_bounded(records, &mut i, para_level, end, text);
+                extract_para_list_bounded(records, &mut i, para_level, end, bf, text);
             }
         } else if rec.header.tag_id == record::HWPTAG_EQEDIT {
             if let Some(script) = extract_eqedit_script(&rec.data) {
@@ -232,7 +261,13 @@ fn format_markdown_table(cells: &[(u16, u16, String)], rows: u16, cols: u16) -> 
 }
 
 /// 표 컨트롤 서브트리에서 마크다운 테이블을 추출한다.
-fn extract_table_subtree(records: &[Record], start: usize, end: usize, text: &mut String) {
+fn extract_table_subtree(
+    records: &[Record],
+    start: usize,
+    end: usize,
+    bf: &HashMap<u16, crate::hwpx::Sides>,
+    text: &mut String,
+) {
     let mut i = start + 1; // CTRL_HEADER 스킵
 
     // TABLE 레코드 찾기
@@ -255,7 +290,7 @@ fn extract_table_subtree(records: &[Record], start: usize, end: usize, text: &mu
 
     if !found_table || rows == 0 || cols == 0 {
         // fallback: 기존 선형 출력
-        extract_ctrl_subtree_linear(records, start, end, text);
+        extract_ctrl_subtree_linear(records, start, end, bf, text);
         return;
     }
 
@@ -263,7 +298,7 @@ fn extract_table_subtree(records: &[Record], start: usize, end: usize, text: &mu
     let list_header_level = if i < end && records[i].header.tag_id == record::HWPTAG_LIST_HEADER {
         records[i].header.level
     } else {
-        extract_ctrl_subtree_linear(records, start, end, text);
+        extract_ctrl_subtree_linear(records, start, end, bf, text);
         return;
     };
 
@@ -293,6 +328,8 @@ fn extract_table_subtree(records: &[Record], start: usize, end: usize, text: &mu
 
     // 각 셀에서 텍스트 추출
     let mut cells: Vec<(u16, u16, String)> = Vec::new();
+    // 셀 테두리가 보이는가 (칸 머리 32~33바이트의 테두리/배경 번호, 문서 정보에 없으면 모름)
+    let mut visible: Vec<Option<crate::hwpx::Sides>> = Vec::new();
 
     for (lh_idx, cell_end) in &cell_ranges {
         let cell_pos = parse_cell_position(&records[*lh_idx].data);
@@ -302,8 +339,15 @@ fn extract_table_subtree(records: &[Record], start: usize, end: usize, text: &mu
         let mut ci = *lh_idx + 1;
         if ci < *cell_end && records[ci].header.tag_id == record::HWPTAG_PARA_HEADER {
             let para_level = records[ci].header.level;
-            extract_para_list_bounded(records, &mut ci, para_level, *cell_end, &mut cell_text);
+            extract_para_list_bounded(records, &mut ci, para_level, *cell_end, bf, &mut cell_text);
         }
+
+        let data = &records[*lh_idx].data;
+        visible.push(if data.len() >= 34 {
+            bf.get(&u16::from_le_bytes([data[32], data[33]])).copied()
+        } else {
+            None
+        });
 
         if let Some((col, row, _, _)) = cell_pos {
             cells.push((col, row, cell_text));
@@ -323,12 +367,43 @@ fn extract_table_subtree(records: &[Record], start: usize, end: usize, text: &mu
         return;
     }
 
+    // 칸 사이 세로선이 보이지 않는 줄(목록 배치용 투명 표·바깥 테두리만 있는 상자)은 본문 줄로,
+    // 나머지는 표로 (0.5.0). 병합으로 빈 자리는 판단에서 뺀다
+    let (r, c) = (rows as usize, cols as usize);
+    let mut grid: Vec<Vec<String>> = vec![vec![String::new(); c]; r];
+    let mut present: Vec<Vec<(usize, Option<crate::hwpx::Sides>)>> = vec![Vec::new(); r];
+    for ((col, row, content), vis) in cells.iter().zip(&visible) {
+        let (row, col) = (*row as usize, *col as usize);
+        if row < r && col < c {
+            grid[row][col] = content.trim_end_matches('\n').to_string();
+            present[row].push((col, *vis));
+        }
+    }
+    let layout: Vec<bool> = present
+        .iter_mut()
+        .map(|cells| {
+            cells.sort_by_key(|(col, _)| *col);
+            let sides: Vec<_> = cells.iter().map(|(_, v)| *v).collect();
+            crate::hwpx::is_layout_row(&sides)
+        })
+        .collect();
+    if layout.contains(&true) {
+        crate::hwpx::emit_table(&grid, &layout, text);
+        return;
+    }
+
     let table_str = format_markdown_table(&cells, rows, cols);
     text.push_str(&table_str);
 }
 
 /// 표가 아닌 컨트롤의 선형 텍스트 추출 (fallback)
-fn extract_ctrl_subtree_linear(records: &[Record], start: usize, end: usize, text: &mut String) {
+fn extract_ctrl_subtree_linear(
+    records: &[Record],
+    start: usize,
+    end: usize,
+    bf: &HashMap<u16, crate::hwpx::Sides>,
+    text: &mut String,
+) {
     let mut i = start + 1;
     while i < end {
         let rec = &records[i];
@@ -336,7 +411,7 @@ fn extract_ctrl_subtree_linear(records: &[Record], start: usize, end: usize, tex
             i += 1;
             if i < end && records[i].header.tag_id == record::HWPTAG_PARA_HEADER {
                 let para_level = records[i].header.level;
-                extract_para_list_bounded(records, &mut i, para_level, end, text);
+                extract_para_list_bounded(records, &mut i, para_level, end, bf, text);
             }
         } else if rec.header.tag_id == record::HWPTAG_EQEDIT {
             if let Some(script) = extract_eqedit_script(&rec.data) {
@@ -358,6 +433,7 @@ fn extract_para_list_bounded(
     pos: &mut usize,
     base_level: u16,
     end: usize,
+    bf: &HashMap<u16, crate::hwpx::Sides>,
     text: &mut String,
 ) {
     while *pos < end {
@@ -366,7 +442,7 @@ fn extract_para_list_bounded(
             break;
         }
         if rec.header.tag_id == record::HWPTAG_PARA_HEADER && rec.header.level == base_level {
-            extract_para(records, pos, base_level, text);
+            extract_para(records, pos, base_level, bf, text);
             if *pos > end {
                 *pos = end;
             }

@@ -5,6 +5,8 @@ pub const HWPTAG_BEGIN: u16 = 0x10;
 
 // DocInfo 태그
 pub const HWPTAG_DOCUMENT_PROPERTIES: u16 = HWPTAG_BEGIN;
+/// 테두리/배경 (문서 정보, 나온 차례가 1부터 매긴 번호)
+pub const HWPTAG_BORDER_FILL: u16 = HWPTAG_BEGIN + 4;
 
 // BodyText 태그
 pub const HWPTAG_PARA_HEADER: u16 = HWPTAG_BEGIN + 50;

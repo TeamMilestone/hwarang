@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::error::{HwpError, Result};
@@ -7,6 +9,19 @@ use crate::hwp::record::{self, Record};
 #[derive(Debug)]
 pub struct DocInfo {
     pub section_count: u16,
+    /// 테두리/배경 번호(1부터) → 변마다 선이 보이는가 (0.5.0)
+    pub border_fills: HashMap<u16, crate::hwpx::Sides>,
+}
+
+/// BORDER_FILL 레코드: 속성 UINT16 뒤에 왼쪽·오른쪽·위·아래 테두리가 [종류 UINT8, 굵기 UINT8, 색 COLORREF] 로
+/// 이어진다. 종류 0 이 "없음"(1 실선, 2 긴 점선 …)
+fn border_sides(data: &[u8]) -> Option<crate::hwpx::Sides> {
+    (data.len() >= 26).then(|| crate::hwpx::Sides {
+        left: data[2] != 0,
+        right: data[8] != 0,
+        top: data[14] != 0,
+        bottom: data[20] != 0,
+    })
 }
 
 /// DocInfo 레코드 시퀀스에서 section_count를 추출한다.
@@ -29,7 +44,42 @@ pub fn parse_doc_info(records: &[Record]) -> Result<DocInfo> {
 
     let section_count = (&first.data[..2]).read_u16::<LittleEndian>()?;
 
-    Ok(DocInfo { section_count })
+    let border_fills = records
+        .iter()
+        .filter(|r| r.header.tag_id == record::HWPTAG_BORDER_FILL)
+        .enumerate()
+        .filter_map(|(i, r)| Some(((i + 1) as u16, border_sides(&r.data)?)))
+        .collect();
+
+    Ok(DocInfo {
+        section_count,
+        border_fills,
+    })
+}
+
+#[cfg(test)]
+mod border_tests {
+    use super::*;
+
+    #[test]
+    fn reads_border_sides() {
+        // 실제 공고문(구미전자정보기술원) 문서 정보의 BORDER_FILL 두 개: 네 변 없음 / 네 변 실선 0.5mm
+        let none = vec![0u8; 40];
+        let mut solid = vec![0u8; 40];
+        for o in [2usize, 8, 14, 20] {
+            solid[o] = 1;
+            solid[o + 1] = 5;
+        }
+        assert_eq!(border_sides(&none), Some(crate::hwpx::Sides::default()));
+        let all = crate::hwpx::Sides {
+            left: true,
+            right: true,
+            top: true,
+            bottom: true,
+        };
+        assert_eq!(border_sides(&solid), Some(all));
+        assert_eq!(border_sides(&[0u8; 10]), None);
+    }
 }
 
 #[cfg(test)]

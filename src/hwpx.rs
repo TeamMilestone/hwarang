@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};
 use std::path::Path;
@@ -36,6 +37,9 @@ pub(crate) fn extract_text_from_archive<R: Read + Seek>(
     }
     section_names.sort();
 
+    // 투명 표를 가리려고 문서 머리(header.xml)의 테두리 정의를 읽는다 (0.5.0). 없거나 못 읽으면 모두 "모름"
+    let borders = read_header_borders(archive);
+
     // Phase 1: 모든 섹션 XML을 순차 읽기 (ZIP I/O)
     let mut section_xmls: Vec<(usize, String)> = Vec::new();
     for (idx, section_name) in section_names.iter().enumerate() {
@@ -56,7 +60,7 @@ pub(crate) fn extract_text_from_archive<R: Read + Seek>(
         .into_par_iter()
         .map(|(idx, xml_data)| {
             let mut text = String::new();
-            extract_section_xml(&xml_data, &mut text)?;
+            extract_section_xml_with(&xml_data, &borders, &mut text)?;
             Ok((idx, text))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -71,9 +75,104 @@ pub(crate) fn extract_text_from_archive<R: Read + Seek>(
     Ok(text)
 }
 
+/// 칸의 네 변에 선이 보이는가
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sides {
+    pub left: bool,
+    pub right: bool,
+    pub top: bool,
+    pub bottom: bool,
+}
+
+/// 테두리/배경 id → 변마다 선이 보이는가
+pub(crate) type BorderMap = HashMap<String, Sides>;
+
+fn read_header_borders<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> BorderMap {
+    let Ok(mut entry) = archive.by_name("Contents/header.xml") else {
+        return BorderMap::new();
+    };
+    let mut xml = String::new();
+    if entry.read_to_string(&mut xml).is_err() {
+        return BorderMap::new();
+    }
+    parse_border_fills(&xml)
+}
+
+/// `<hh:borderFill id="3"><hh:leftBorder type="NONE"/>…<hh:bottomBorder type="NONE"/></hh:borderFill>` (HWPX)
+/// 또는 `<BORDERFILL Id="3"><LEFTBORDER Type="None"/>…</BORDERFILL>` (HWPML). 네 변이 모두 있고 모두 없음이면 투명
+fn parse_border_fills(xml: &str) -> BorderMap {
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut map = BorderMap::new();
+    let mut current: Option<(String, u8, Sides)> = None; // (id, 읽은 변 수, 보이는 변)
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                let name = e.local_name();
+                let name = name.as_ref();
+                if name.eq_ignore_ascii_case(b"borderFill") {
+                    current = attr(e, &[b"id", b"Id"]).map(|id| (id, 0, Sides::default()));
+                } else if let Some((_, count, sides)) = current.as_mut() {
+                    let slot = if name.eq_ignore_ascii_case(b"leftBorder") {
+                        Some(&mut sides.left)
+                    } else if name.eq_ignore_ascii_case(b"rightBorder") {
+                        Some(&mut sides.right)
+                    } else if name.eq_ignore_ascii_case(b"topBorder") {
+                        Some(&mut sides.top)
+                    } else if name.eq_ignore_ascii_case(b"bottomBorder") {
+                        Some(&mut sides.bottom)
+                    } else {
+                        None
+                    };
+                    if let Some(slot) = slot {
+                        *count += 1;
+                        let kind = attr(e, &[b"type", b"Type"]).unwrap_or_default();
+                        *slot = !kind.eq_ignore_ascii_case("none");
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                if e.local_name().as_ref().eq_ignore_ascii_case(b"borderFill") {
+                    if let Some((id, count, sides)) = current.take() {
+                        if count == 4 {
+                            map.insert(id, sides);
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    map
+}
+
+fn attr(e: &quick_xml::events::BytesStart, names: &[&[u8]]) -> Option<String> {
+    e.attributes().flatten().find_map(|a| {
+        names
+            .contains(&a.key.local_name().as_ref())
+            .then(|| String::from_utf8_lossy(&a.value).into_owned())
+    })
+}
+
+/// 칸의 변마다 선이 보이는가. 테두리 정의를 모르면 None
+fn cell_visibility(
+    e: &quick_xml::events::BytesStart,
+    names: &[&[u8]],
+    borders: &BorderMap,
+) -> Option<Sides> {
+    attr(e, names).and_then(|id| borders.get(&id).copied())
+}
+
 /// 섹션 XML에서 텍스트를 추출한다.
 /// <hp:p> → 줄바꿈, <hp:t> → 텍스트 수집, <hp:tbl> → 표 (표 안의 표도 바깥 셀에 넣는다)
+#[cfg(test)]
 fn extract_section_xml(xml: &str, text: &mut String) -> Result<()> {
+    extract_section_xml_with(xml, &BorderMap::new(), text)
+}
+
+fn extract_section_xml_with(xml: &str, borders: &BorderMap, text: &mut String) -> Result<()> {
     let mut reader = Reader::from_str(xml);
     let mut in_t_tag = false;
     let mut out = TextBuilder::default();
@@ -85,14 +184,14 @@ fn extract_section_xml(xml: &str, text: &mut String) -> Result<()> {
                 b"t" => in_t_tag = true,
                 b"tbl" => out.table_start(),
                 b"tr" => out.row_start(),
-                b"tc" => out.cell_start(),
+                b"tc" => out.cell_start(cell_visibility(e, &[b"borderFillIDRef"], borders)),
                 b"p" => out.para_start(),
                 _ => {}
             },
             // 빈 요소는 열고 닫은 것으로 본다. 빈 <hp:t/> 는 글이 없다
             Ok(Event::Empty(ref e)) => {
                 if e.local_name().as_ref() == b"tc" {
-                    out.cell_start();
+                    out.cell_start(cell_visibility(e, &[b"borderFillIDRef"], borders));
                     out.cell_end();
                 }
             }
@@ -145,6 +244,10 @@ struct TextBuilder {
 struct OpenTable {
     rows: Vec<Vec<String>>,
     row: Vec<String>,
+    /// 칸 테두리가 보이는가 (rows·row 와 같은 모양, 모르면 None)
+    rows_vis: Vec<Vec<Option<Sides>>>,
+    row_vis: Vec<Option<Sides>>,
+    cell_vis: Option<Sides>,
     /// 열린 셀의 글
     cell: Option<String>,
     cell_para_has_text: bool,
@@ -158,13 +261,15 @@ impl TextBuilder {
     fn row_start(&mut self) {
         if let Some(t) = self.tables.last_mut() {
             t.row.clear();
+            t.row_vis.clear();
         }
     }
 
-    fn cell_start(&mut self) {
+    fn cell_start(&mut self, visible: Option<Sides>) {
         if let Some(t) = self.tables.last_mut() {
             t.cell = Some(String::new());
             t.cell_para_has_text = false;
+            t.cell_vis = visible;
         }
     }
 
@@ -217,6 +322,7 @@ impl TextBuilder {
         if let Some(t) = self.tables.last_mut() {
             if let Some(cell) = t.cell.take() {
                 t.row.push(cell.trim_end_matches('\n').to_string());
+                t.row_vis.push(t.cell_vis.take());
             }
         }
     }
@@ -226,6 +332,8 @@ impl TextBuilder {
             if !t.row.is_empty() {
                 let row = std::mem::take(&mut t.row);
                 t.rows.push(row);
+                let vis = std::mem::take(&mut t.row_vis);
+                t.rows_vis.push(vis);
             }
         }
     }
@@ -235,7 +343,8 @@ impl TextBuilder {
             return;
         };
         let mut rendered = String::new();
-        emit_hwpx_markdown_table(&table.rows, &mut rendered);
+        let layout: Vec<bool> = table.rows_vis.iter().map(|v| is_layout_row(v)).collect();
+        emit_table(&table.rows, &layout, &mut rendered);
         self.write_block(&rendered);
     }
 
@@ -317,6 +426,8 @@ pub fn extract_text_from_hwpml(path: &Path) -> Result<String> {
 /// HWPML XML에서 텍스트를 추출한다.
 /// <P> → 줄바꿈, <CHAR> → 텍스트 수집, <TABLE> → 표 (표 안의 표도 바깥 셀에 넣는다)
 fn extract_hwpml_xml(xml: &str, text: &mut String) -> Result<()> {
+    // 테두리 정의(HEAD 의 BORDERFILL)는 본문보다 앞에 있다 — 같은 글에서 먼저 읽어 둔다
+    let borders = parse_border_fills(xml);
     let mut reader = Reader::from_str(xml);
     let mut in_char_tag = false;
     let mut out = TextBuilder::default();
@@ -328,7 +439,7 @@ fn extract_hwpml_xml(xml: &str, text: &mut String) -> Result<()> {
                 b"CHAR" => in_char_tag = true,
                 b"TABLE" => out.table_start(),
                 b"ROW" => out.row_start(),
-                b"CELL" => out.cell_start(),
+                b"CELL" => out.cell_start(cell_visibility(e, &[b"BorderFill"], &borders)),
                 b"P" => out.para_start(),
                 _ => {}
             },
@@ -363,6 +474,61 @@ fn extract_hwpml_xml(xml: &str, text: &mut String) -> Result<()> {
 
     text.push_str(&out.finish());
     Ok(())
+}
+
+/// 본문 줄로 쓸 표 줄: 모든 칸의 테두리를 알고, 이웃한 칸 사이 세로선이 하나도 보이지 않는다.
+/// 목록 배치용 투명 표와 바깥 테두리만 있는 상자가 여기 든다. 칸 사이 세로선이 있으면 실제 표다
+pub(crate) fn is_layout_row(cells: &[Option<Sides>]) -> bool {
+    !cells.is_empty()
+        && cells.iter().all(Option::is_some)
+        && cells
+            .windows(2)
+            .all(|w| matches!((w[0], w[1]), (Some(a), Some(b)) if !a.right && !b.left))
+}
+
+/// 표를 쓴다. 작성자가 목록 배치를 맞추려고 쓴 줄(`is_layout_row`)은 본문 줄로 쓰고,
+/// 칸 사이 세로선이 보이는 줄이 이어진 부분만 마크다운 표로 쓴다 (0.5.0). 그런 줄이 없으면 전과 같다
+pub(crate) fn emit_table(rows: &[Vec<String>], layout: &[bool], text: &mut String) {
+    let layout: Vec<bool> = (0..rows.len())
+        .map(|i| layout.get(i).copied().unwrap_or(false))
+        .collect();
+    if !layout.contains(&true) {
+        emit_hwpx_markdown_table(rows, text);
+        return;
+    }
+    let mut i = 0;
+    while i < rows.len() {
+        if layout[i] {
+            emit_layout_row(&rows[i], text);
+            i += 1;
+            continue;
+        }
+        let end = (i..rows.len()).find(|&k| layout[k]).unwrap_or(rows.len());
+        emit_hwpx_markdown_table(&rows[i..end], text);
+        i = end;
+    }
+}
+
+/// 투명한 줄 하나: 채운 칸을 차례로 잇는다. "1." "○" 같은 짧은 기호 칸 뒤는 띄어 쓰고,
+/// 여러 줄인 칸 사이는 줄을 바꾼다
+fn emit_layout_row(row: &[String], text: &mut String) {
+    let mut line = String::new();
+    for cell in row
+        .iter()
+        .map(|c| c.trim_matches(|ch: char| ch == '\n' || ch == ' '))
+        .filter(|c| !c.is_empty())
+    {
+        if !line.is_empty() {
+            let marker = !line.contains('\n') && line.chars().count() <= 6;
+            let multi = line.contains('\n') || cell.contains('\n');
+            line.push(if multi && !marker { '\n' } else { ' ' });
+        }
+        line.push_str(cell);
+    }
+    if !line.is_empty() {
+        text.push_str(&line);
+        text.push('\n');
+    }
 }
 
 /// 1×1 표(테두리 상자)의 글을 본문처럼 쓴다. 빈 상자는 쓰지 않는다
@@ -574,6 +740,91 @@ mod tests {
         extract_hwpml_xml(xml, &mut text).unwrap();
         assert!(
             text.starts_with("바깥 앞\n| 가 | 나 |\n| --- | --- |\n바깥 뒤\n"),
+            "got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn test_invisible_rows_become_lines_visible_rows_stay_a_table() {
+        let header = r#"<hh:head xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head"><hh:borderFills>
+<hh:borderFill id="1"><hh:leftBorder type="NONE"/><hh:rightBorder type="NONE"/><hh:topBorder type="NONE"/><hh:bottomBorder type="NONE"/></hh:borderFill>
+<hh:borderFill id="2"><hh:leftBorder type="SOLID"/><hh:rightBorder type="SOLID"/><hh:topBorder type="SOLID"/><hh:bottomBorder type="SOLID"/></hh:borderFill>
+</hh:borderFills></hh:head>"#;
+        let borders = parse_border_fills(header);
+        assert_eq!(borders.get("1"), Some(&Sides::default()));
+        assert!(borders
+            .get("2")
+            .is_some_and(|s| s.left && s.right && s.top && s.bottom));
+        let tc = |bf: u8, t: &str| {
+            format!(
+                r#"<hp:tc borderFillIDRef="{bf}"><hp:subList><hp:p><hp:run><hp:t>{t}</hp:t></hp:run></hp:p></hp:subList></hp:tc>"#
+            )
+        };
+        let xml = format!(
+            r#"<hp:sec xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"><hp:p><hp:run><hp:tbl>
+<hp:tr>{}{}{}</hp:tr>
+<hp:tr>{}{}{}</hp:tr>
+<hp:tr>{}{}{}</hp:tr>
+<hp:tr>{}{}{}</hp:tr>
+</hp:tbl></hp:run></hp:p></hp:sec>"#,
+            tc(1, "○"),
+            tc(1, "공고명:"),
+            tc(1, "현장 체험활동 위탁 용역"),
+            tc(1, "1."),
+            tc(1, "금품을 요구하지 않겠습니다."),
+            tc(1, ""),
+            tc(2, "구분"),
+            tc(2, "금액"),
+            tc(2, "비고"),
+            tc(2, "계약보증금"),
+            tc(2, "10%"),
+            tc(2, "-"),
+        );
+        let mut text = String::new();
+        extract_section_xml_with(&xml, &borders, &mut text).unwrap();
+        assert!(
+            text.starts_with("○ 공고명: 현장 체험활동 위탁 용역\n1. 금품을 요구하지 않겠습니다.\n| 구분 | 금액 | 비고 |\n| --- | --- | --- |\n| 계약보증금 | 10% | - |\n"),
+            "got: {text:?}"
+        );
+        // 테두리 정의를 모르면 전과 같이 표로
+        let mut plain = String::new();
+        extract_section_xml(&xml, &mut plain).unwrap();
+        assert!(plain.starts_with("| ○ | 공고명: |"), "got: {plain:?}");
+    }
+
+    #[test]
+    fn test_framed_box_without_inner_lines_is_text() {
+        // 바깥 테두리만 있는 상자(왼쪽 칸은 왼쪽 선, 오른쪽 칸은 오른쪽 선만)는 본문, 칸 사이 선이 있으면 표
+        let left = Sides {
+            left: true,
+            ..Sides::default()
+        };
+        let right = Sides {
+            right: true,
+            ..Sides::default()
+        };
+        let grid = Sides {
+            left: true,
+            right: true,
+            top: true,
+            bottom: true,
+        };
+        assert!(is_layout_row(&[Some(left), Some(right)]));
+        assert!(!is_layout_row(&[Some(grid), Some(grid)]));
+        assert!(!is_layout_row(&[Some(left), None]));
+        assert!(is_layout_row(&[Some(grid)]));
+    }
+
+    #[test]
+    fn test_hwpml_invisible_rows() {
+        let xml = r#"<HWPML><HEAD><BORDERFILLLIST><BORDERFILL Id="1"><LEFTBORDER Type="None"/><RIGHTBORDER Type="None"/><TOPBORDER Type="None"/><BOTTOMBORDER Type="None"/></BORDERFILL></BORDERFILLLIST></HEAD><BODY><SECTION><P><TEXT><TABLE>
+<ROW><CELL BorderFill="1"><PARALIST><P><TEXT><CHAR>가.</CHAR></TEXT></P></PARALIST></CELL><CELL BorderFill="1"><PARALIST><P><TEXT><CHAR>용역명: 시설관리</CHAR></TEXT></P></PARALIST></CELL></ROW>
+<ROW><CELL BorderFill="1"><PARALIST><P><TEXT><CHAR>나.</CHAR></TEXT></P></PARALIST></CELL><CELL BorderFill="1"><PARALIST><P><TEXT><CHAR>기간: 1년</CHAR></TEXT></P></PARALIST></CELL></ROW>
+</TABLE></TEXT></P></SECTION></BODY></HWPML>"#;
+        let mut text = String::new();
+        extract_hwpml_xml(xml, &mut text).unwrap();
+        assert!(
+            text.starts_with("가. 용역명: 시설관리\n나. 기간: 1년\n"),
             "got: {text:?}"
         );
     }

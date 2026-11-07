@@ -5,6 +5,21 @@
 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/)를 따르며,
 버전은 [Semantic Versioning](https://semver.org/lang/ko/)을 준수합니다.
 
+## [0.5.0] - 2026-11-08
+
+### Changed
+
+- **목록 배치용 투명 표는 표가 아니라 본문 줄로 출력** — HWP·HWPX·HWPML
+  - 공고문 작성자가 번호·글머리표 들여쓰기를 맞추려고 테두리 없는 표를 자주 쓴다.
+    전에는 모두 마크다운 표가 돼 본문이 빈 칸 많은 표로 보였다
+  - 칸의 테두리 정의를 읽는다: HWPX `header.xml` 의 `hh:borderFill`(칸의
+    `borderFillIDRef`), HWPML `BORDERFILL`(칸의 `BorderFill`), HWP 5.0 문서 정보의
+    BORDER_FILL 레코드(칸 머리의 테두리/배경 번호, 변마다 종류 0 = 없음)
+  - 이웃한 칸 사이 세로선이 하나도 보이지 않는 줄(투명 표, 바깥 테두리만 있는 상자)은
+    채운 칸을 이어 한 줄로 쓰고, 칸 사이 세로선이 있는 줄이 이어진 부분만 표로 쓴다
+  - 테두리 정의를 못 읽거나 그런 줄이 없는 표는 전과 같다
+  - 예: 공고문 한 건(HWPX) 표 줄 221 → 5, 낱말 수 그대로
+
 ## [0.4.1] - 2026-11-08
 
 ### Fixed

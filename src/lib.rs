@@ -126,6 +126,7 @@ fn extract_text_from_hwp(path: &Path) -> Result<String> {
     // Phase 2: 섹션별 병렬 처리 (압축해제 + 레코드 파싱 + 텍스트 추출)
     let compressed = header.compressed;
     let distribution = header.distribution;
+    let border_fills = &doc_info.border_fills;
 
     let mut section_texts: Vec<(u16, String)> = section_raw
         .into_par_iter()
@@ -145,7 +146,7 @@ fn extract_text_from_hwp(path: &Path) -> Result<String> {
 
             let records = record::read_records(&data)?;
             let mut text = String::new();
-            text_extract::extract_section_text(&records, &mut text);
+            text_extract::extract_section_text_with(&records, border_fills, &mut text);
             Ok((i, text))
         })
         .collect::<Result<Vec<_>>>()?;
