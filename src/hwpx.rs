@@ -511,17 +511,24 @@ pub(crate) fn emit_table(rows: &[Vec<String>], layout: &[bool], text: &mut Strin
 
 /// 투명한 줄 하나: 채운 칸을 차례로 잇는다. "1." "○" 같은 짧은 기호 칸 뒤는 띄어 쓰고,
 /// 여러 줄인 칸 사이는 줄을 바꾼다
+/// 칸 사이는 탭으로 잇는다 — 작성자가 투명 표로 맞춘 줄(항목 이름 칸·내용 칸)의 칸 경계를 남겨
+/// 읽는 쪽이 열을 다시 맞출 수 있게 한다. 줄 머리 기호만 든 칸("○", "1.", "가.")은 빈칸으로 잇고,
+/// 앞 칸이 여러 줄이면 다음 칸은 새 줄에서 시작한다. 여러 줄인 칸이 뒤에 오면 첫 줄만 탭 뒤에 붙는다
 fn emit_layout_row(row: &[String], text: &mut String) {
     let mut line = String::new();
     for cell in row
         .iter()
         .map(|c| c.trim_matches(|ch: char| ch == '\n' || ch == ' '))
-        .filter(|c| !c.is_empty())
+        .filter(|c| !c.trim().is_empty())
     {
         if !line.is_empty() {
-            let marker = !line.contains('\n') && line.chars().count() <= 6;
-            let multi = line.contains('\n') || cell.contains('\n');
-            line.push(if multi && !marker { '\n' } else { ' ' });
+            line.push(if line.contains('\n') {
+                '\n'
+            } else if is_list_marker(&line) {
+                ' '
+            } else {
+                '\t'
+            });
         }
         line.push_str(cell);
     }
@@ -529,6 +536,30 @@ fn emit_layout_row(row: &[String], text: &mut String) {
         text.push_str(&line);
         text.push('\n');
     }
+}
+
+/// 줄 머리 기호만 든 칸: 기호(○·□·※·-·▶), "1" "1." "1)" "(1)", "가." "가)" "(가)", "①"
+pub(crate) fn is_list_marker(s: &str) -> bool {
+    let s = s.trim();
+    let n = s.chars().count();
+    if n == 0 || n > 4 {
+        return false;
+    }
+    if s.chars().all(|c| !c.is_alphanumeric())
+        || (n <= 2 && s.chars().all(|c| c.is_ascii_digit()))
+        || (n == 1 && ('①'..='⑳').contains(&s.chars().next().unwrap()))
+    {
+        return true;
+    }
+    let inner = s
+        .trim_start_matches(['(', '（'])
+        .trim_end_matches(['.', '．', ')', '）']);
+    if inner.len() == s.len() {
+        return false;
+    }
+    let k = inner.chars().count();
+    (1..=2).contains(&k) && inner.chars().all(|c| c.is_ascii_digit())
+        || k == 1 && inner.chars().all(|c| ('가'..='하').contains(&c))
 }
 
 /// 1×1 표(테두리 상자)의 글을 본문처럼 쓴다. 빈 상자는 쓰지 않는다
@@ -783,7 +814,7 @@ mod tests {
         let mut text = String::new();
         extract_section_xml_with(&xml, &borders, &mut text).unwrap();
         assert!(
-            text.starts_with("○ 공고명: 현장 체험활동 위탁 용역\n1. 금품을 요구하지 않겠습니다.\n| 구분 | 금액 | 비고 |\n| --- | --- | --- |\n| 계약보증금 | 10% | - |\n"),
+            text.starts_with("○ 공고명:\t현장 체험활동 위탁 용역\n1. 금품을 요구하지 않겠습니다.\n| 구분 | 금액 | 비고 |\n| --- | --- | --- |\n| 계약보증금 | 10% | - |\n"),
             "got: {text:?}"
         );
         // 테두리 정의를 모르면 전과 같이 표로
@@ -813,6 +844,44 @@ mod tests {
         assert!(!is_layout_row(&[Some(grid), Some(grid)]));
         assert!(!is_layout_row(&[Some(left), None]));
         assert!(is_layout_row(&[Some(grid)]));
+    }
+
+    #[test]
+    fn test_layout_row_cells_are_tab_separated_markers_take_a_space() {
+        let rows = vec![
+            vec![
+                "○ 계약담당자".to_string(),
+                " 한국농수산대학교 김혜정".to_string(),
+                String::new(),
+            ],
+            vec![
+                "○".into(),
+                "사업담당자:".into(),
+                "한국농수산대학교 김지원".into(),
+            ],
+            vec!["(가)".into(), "계약보증금".into(), "10%".into()],
+            vec!["2026. 3. 16.".into(), "제천시 재무관".into()],
+            vec![
+                "발주내용".into(),
+                "[ ] 공사\n[ ] 용역".into(),
+                "\u{3000}\u{3000}".into(),
+            ],
+            vec!["가\n나".into(), "다".into()],
+        ];
+        let mut text = String::new();
+        emit_table(&rows, &[true; 6], &mut text);
+        assert_eq!(
+            text,
+            "○ 계약담당자\t한국농수산대학교 김혜정\n○ 사업담당자:\t한국농수산대학교 김지원\n(가) 계약보증금\t10%\n2026. 3. 16.\t제천시 재무관\n발주내용\t[ ] 공사\n[ ] 용역\n가\n나\n다\n"
+        );
+        for m in [
+            "○", "※", "-", "1", "10", "1.", "12)", "(3)", "가.", "(나)", "①",
+        ] {
+            assert!(is_list_marker(m), "{m}");
+        }
+        for s in ["계약담당자", "공고명:", "2026.", "123.", "가나.", "10%"] {
+            assert!(!is_list_marker(s), "{s}");
+        }
     }
 
     #[test]
